@@ -1,0 +1,48 @@
+{
+  "_comment": "Custom sets for randomon. Keys are species IDs (lowercase, no spaces).",
+  "_comment2": "Pokémon already in sets.json get these sets merged in. New Pokémon are added to the pool.",
+
+  "charizard": {
+    "sets": [
+      {
+        "role": "Tera Blast user",
+        "movepool": ["Sunny Day", "Solar Beam", "Fire Blast", "Focus Blast"],
+        "abilities": ["Solar Power"],
+        "teraTypes": ["Fire", "Grass"]
+      }
+    ]
+  },
+
+  "togekiss": {
+    "sets": [
+      {
+        "role": "Bulky Support",
+        "movepool": ["Air Slash", "Thunder Wave", "Nasty Plot", "Roost"],
+        "abilities": ["Serene Grace"],
+        "teraTypes": ["Fairy", "Flying", "Steel"]
+      }
+    ]
+  },
+
+  "alakazam": {
+    "sets": [
+      {
+        "role": "Fast Attacker",
+        "movepool": ["Psychic", "Shadow Ball", "Focus Blast", "Recover"],
+        "abilities": ["Magic Guard"],
+        "teraTypes": ["Psychic", "Fighting", "Fairy"]
+      }
+    ]
+  },
+
+  "machamp": {
+    "sets": [
+      {
+        "role": "Wallbreaker",
+        "movepool": ["Dynamic Punch", "Knock Off", "Bullet Punch", "Stone Edge"],
+        "abilities": ["No Guard"],
+        "teraTypes": ["Fighting", "Ghost", "Normal"]
+      }
+    ]
+  }
+}
