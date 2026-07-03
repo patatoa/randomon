@@ -3897,54 +3897,6 @@
       }
     ]
   },
-  "chansey": {
-    "level": 85,
-    "sets": [
-      {
-        "role": "Bulky Support",
-        "movepool": [
-          "Heal Bell",
-          "Seismic Toss",
-          "Soft-Boiled",
-          "Stealth Rock",
-          "Thunder Wave"
-        ],
-        "abilities": [
-          "Natural Cure"
-        ],
-        "teraTypes": [
-          "Dark",
-          "Fairy",
-          "Ghost",
-          "Poison"
-        ]
-      }
-    ]
-  },
-  "blissey": {
-    "level": 85,
-    "sets": [
-      {
-        "role": "Bulky Support",
-        "movepool": [
-          "Heal Bell",
-          "Seismic Toss",
-          "Soft-Boiled",
-          "Stealth Rock",
-          "Thunder Wave"
-        ],
-        "abilities": [
-          "Natural Cure"
-        ],
-        "teraTypes": [
-          "Dark",
-          "Fairy",
-          "Ghost",
-          "Poison"
-        ]
-      }
-    ]
-  },
   "raikou": {
     "level": 81,
     "sets": [
@@ -10084,27 +10036,6 @@
       }
     ]
   },
-  "avalugg": {
-    "level": 88,
-    "sets": [
-      {
-        "role": "Bulky Support",
-        "movepool": [
-          "Avalanche",
-          "Body Press",
-          "Curse",
-          "Rapid Spin",
-          "Recover"
-        ],
-        "abilities": [
-          "Sturdy"
-        ],
-        "teraTypes": [
-          "Fighting"
-        ]
-      }
-    ]
-  },
   "avalugghisui": {
     "level": 90,
     "sets": [
@@ -10742,30 +10673,6 @@
         ],
         "teraTypes": [
           "Fighting"
-        ]
-      }
-    ]
-  },
-  "toxapex": {
-    "level": 82,
-    "sets": [
-      {
-        "role": "Bulky Support",
-        "movepool": [
-          "Haze",
-          "Liquidation",
-          "Recover",
-          "Toxic",
-          "Toxic Spikes"
-        ],
-        "abilities": [
-          "Regenerator"
-        ],
-        "teraTypes": [
-          "Fairy",
-          "Flying",
-          "Grass",
-          "Steel"
         ]
       }
     ]
