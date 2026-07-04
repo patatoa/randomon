@@ -13,8 +13,9 @@
 │   ├── build-tools/update                ← client build script (run from client/)
 │   ├── config/
 │   │   ├── config.js                     ← CLIENT config (gitignored — create on VM)
-│   │   ├── config.production.js          ← template for the above (committed)
-│   │   └── routes.json                   ← asset URL roots (committed as localhost:8080 — edit before prod build)
+│   │   ├── config.production.js          ← template for config.js (committed)
+│   │   ├── routes.json                   ← asset URL roots (committed as localhost:8080 — overwritten in Step 6b)
+│   │   └── routes.production.json        ← production routes (committed; cp'd over routes.json in Step 6b)
 │   └── play.pokemonshowdown.com/         ← nginx serves this directory as the website root
 │       ├── index.html                    ← generated: cp caches/index-new.html index.html
 │       ├── sprites/                      ← downloaded by scripts/download-assets.sh (gitignored)
@@ -159,13 +160,13 @@ Config.defaultserver = {
 };
 ```
 
-**6b. Fix routes.json for production** — the committed file has `localhost:8080`; change it to the real domain:
+**6b. Install production routes** — the committed `routes.json` has `localhost:8080`; replace it with the production copy:
 
 ```bash
-sed -i 's/localhost:8080/randomon.patatoa.com/' /opt/randomon/client/config/routes.json
+cp /opt/randomon/client/config/routes.production.json /opt/randomon/client/config/routes.json
 ```
 
-This controls the URL prefix for all sprites and assets (`//randomon.patatoa.com/sprites/...`).
+This controls the URL prefix for all sprites and assets (`//randomon.patatoa.com/sprites/...`). The `cp` keeps `routes.json` untracked in git (no dirty working tree on future `git pull`).
 
 **6c. Build the client:**
 
@@ -210,10 +211,13 @@ bash scripts/download-assets.sh
 to the bucket (run this once from any machine that has GCP permissions):
 
 ```bash
-# Get the service account email shown on the VM:
-#   gcloud config get-value account
+# Get the VM's default service account email (format: <project-number>-compute@developer.gserviceaccount.com)
+PROJECT_ID=$(gcloud config get-value project)
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='get(projectNumber)')
+SA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+
 gcloud storage buckets add-iam-policy-binding gs://randomon-assets \
-  --member="serviceAccount:<VM_SERVICE_ACCOUNT_EMAIL>" \
+  --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/storage.objectViewer"
 ```
 

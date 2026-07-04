@@ -5,8 +5,10 @@ npm-debug.log
 /config/
 !/config/config.production.js
 !/config/routes.json
+!/config/routes.production.json
 /vendor/
 /caches/
+!/caches/pokemon-showdown
 
 /play.pokemonshowdown.com/dirindex/webfonts/
 /play.pokemonshowdown.com/dirindex/fontawesome5*
