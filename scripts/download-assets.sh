@@ -113,8 +113,10 @@ done
 
 echo "==> Downloading gen6 battle backgrounds..."
 mkdir -p "$CLIENT/sprites/gen6bgs"
-for i in $(seq -w 01 19); do
-  fetch "$CLIENT/sprites/gen6bgs/bg-${i}.jpg" "$CDN/sprites/gen6bgs/bg-${i}.jpg"
+BGS=(aquacordetown beach city dampcave darkbeach darkcity darkmeadow deepsea desert
+     earthycave elite4drake forest icecave leaderwallace library meadow orasdesert orassea skypillar)
+for bg in "${BGS[@]}"; do
+  fetch "$CLIENT/sprites/gen6bgs/bg-${bg}.jpg" "$CDN/sprites/gen6bgs/bg-${bg}.jpg"
 done
 
 echo "==> Downloading icon sheets..."
