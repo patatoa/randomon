@@ -11,9 +11,10 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const child_process = require('node:child_process');
-const compiler = require('./compiler.mjs');
-
 process.chdir(__dirname + '/..');
+
+(async () => {
+const compiler = await import('./compiler.mjs');
 
 const AUTOCONFIG_START = '/*** Begin automatically generated configuration ***/';
 const AUTOCONFIG_END = '/*** End automatically generated configuration ***/';
@@ -256,3 +257,4 @@ teamsContents = teamsContents.replace(URL_REGEX, addCachebuster);
 fs.writeFileSync('teams.pokemonshowdown.com/index.html', teamsContents);
 
 console.log("DONE");
+})();

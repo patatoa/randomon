@@ -132,8 +132,8 @@ done
 echo "==> Downloading FX assets..."
 mkdir -p "$CLIENT/fx"
 FX_FILES=(
-  bg-gen1.png bg-gen2.png weather-hail.png weather-sandstorm.png weather-sun.png
-  weather-rain.png weather-snow.png item.png gender-f.png gender-m.png
+  bg-gen1.png bg-gen2.png weather-hail.png weather-sandstorm.png weather-sunnyday.jpg
+  weather-raindance.jpg item.png gender-f.png gender-m.png
 )
 for f in "${FX_FILES[@]}"; do
   fetch "$CLIENT/fx/$f" "$CDN/fx/$f"
