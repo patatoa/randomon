@@ -1,14 +1,40 @@
 #!/usr/bin/env bash
-# Download sprites, data files, and other binary assets needed for the self-hosted client.
-# Run from the repo root: bash scripts/download-assets.sh
-# Safe to re-run: existing files are skipped.
+# Download sprites, data files, and FX assets needed for the self-hosted client.
+#
+# Default (production/VM): pulls from your GCS bucket. No CDN dependency.
+#   bash scripts/download-assets.sh
+#
+# --cdn flag (local dev / initial bucket population): pulls from PS CDN.
+#   bash scripts/download-assets.sh --cdn
+#
+# Set RANDOMON_BUCKET to override the default bucket name.
+# Run from the repo root.
 
 set -e
 
-CDN="https://play.pokemonshowdown.com"
+BUCKET="${RANDOMON_BUCKET:-gs://randomon-assets}"
 CLIENT="client/play.pokemonshowdown.com"
 
-# Pool sprite IDs (generated from data/random-battles/randomon/sets.json via Dex.spriteid)
+# ── GCS mode (default) ────────────────────────────────────────────────────────
+
+if [ "${1:-}" != "--cdn" ]; then
+  if ! command -v gcloud &>/dev/null; then
+    echo "ERROR: gcloud not found. Install the Google Cloud SDK or run with --cdn."
+    exit 1
+  fi
+  echo "==> Pulling assets from ${BUCKET}..."
+  mkdir -p "$CLIENT/sprites" "$CLIENT/fx" "$CLIENT/data"
+  gcloud storage rsync -r "${BUCKET}/sprites" "$CLIENT/sprites"
+  gcloud storage rsync -r "${BUCKET}/fx"      "$CLIENT/fx"
+  gcloud storage rsync -r "${BUCKET}/data"    "$CLIENT/data"
+  echo "==> Done."
+  exit 0
+fi
+
+# ── CDN mode (--cdn) ──────────────────────────────────────────────────────────
+
+CDN="https://play.pokemonshowdown.com"
+
 POOL_SPRITES=(
   venusaur charizard blastoise arbok pikachu raichu raichu-alola sandslash sandslash-alola
   clefable ninetales ninetales-alola wigglytuff vileplume venomoth dugtrio dugtrio-alola
@@ -63,7 +89,6 @@ POOL_SPRITES=(
   ironboulder ironcrown terapagos pecharunt blissey chansey toxapex avalugg
 )
 
-# Species with female sprite variants (frontf flag in BattlePokemonSpritesBW, intersected with pool)
 FEMALE_SPRITES=(
   venusaur pikachu raichu scyther gyarados meganium ledyba ledian xatu sudowoodo politoed
   aipom wooper quagsire murkrow unown wobbuffet girafarig gligar steelix scizor heracross
@@ -78,9 +103,7 @@ FEMALE_SPRITES=(
 fetch() {
   local dest="$1"
   local url="$2"
-  if [ -f "$dest" ]; then
-    return 0
-  fi
+  if [ -f "$dest" ]; then return 0; fi
   mkdir -p "$(dirname "$dest")"
   curl -fsSL --retry 3 -o "$dest" "$url" || echo "WARN: failed $url"
 }
@@ -106,7 +129,7 @@ for id in "${POOL_SPRITES[@]}"; do
   fetch "$CLIENT/sprites/gen5-back/${id}.png" "$CDN/sprites/gen5-back/${id}.png"
 done
 
-echo "==> Downloading female front sprites (${#FEMALE_SPRITES[@]} species)..."
+echo "==> Downloading female front sprites..."
 for id in "${FEMALE_SPRITES[@]}"; do
   fetch "$CLIENT/sprites/gen5/${id}-f.png" "$CDN/sprites/gen5/${id}-f.png"
 done
@@ -141,4 +164,7 @@ for f in "${FX_FILES[@]}"; do
   fetch "$CLIENT/fx/$f" "$CDN/fx/$f"
 done
 
-echo "==> Done. All assets downloaded to $CLIENT."
+echo "==> Done (CDN). All assets downloaded to $CLIENT."
+echo ""
+echo "    To populate your GCS bucket so future VMs don't need the CDN:"
+echo "    bash scripts/upload-assets-to-gcs.sh"

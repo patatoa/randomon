@@ -1,174 +1,228 @@
-# Rando Mon — Deployment Plan
+# Rando Mon — Deployment
 
-## Target
+## What lives where
 
-| | |
-|---|---|
-| **URL** | `https://randomon.patatoa.com` |
-| **DNS** | Current registrar (add one A record) — or migrate to Cloudflare (see §DNS) |
-| **TLS** | Let's Encrypt via certbot on the VM (free, auto-renews) |
-| **Compute** | GCP `e2-micro` — Ubuntu 24.04 LTS (always-free tier) |
-| **Server repo** | `github.com/patatoa/randomon` ✓ (already on GitHub) |
-| **Client repo** | `github.com/patatoa/randomon-client` ← needs to be created (Step 0) |
+```
+/opt/randomon/                            ← git clone of patatoa/randomPokemon
+│
+├── pokemon-showdown                      ← PS game server entry point
+├── config/
+│   └── config.js                         ← SERVER config (gitignored — create on VM)
+│
+├── client/                               ← PS web client (monorepo, not a submodule)
+│   ├── build-tools/update                ← client build script (run from client/)
+│   ├── config/
+│   │   ├── config.js                     ← CLIENT config (gitignored — create on VM)
+│   │   ├── config.production.js          ← template for the above (committed)
+│   │   └── routes.json                   ← asset URL roots (committed as localhost:8080 — edit before prod build)
+│   └── play.pokemonshowdown.com/         ← nginx serves this directory as the website root
+│       ├── index.html                    ← generated: cp caches/index-new.html index.html
+│       ├── sprites/                      ← downloaded by scripts/download-assets.sh (gitignored)
+│       ├── data/                         ← built: graphics.js, battledata.js, etc.
+│       └── js/                           ← built: client JS bundle
+│
+└── scripts/
+    └── download-assets.sh                ← downloads all sprites + binary assets from PS CDN
+```
 
----
-
-## Architecture
-
+**Traffic flow:**
 ```
 Browser (HTTPS / WSS)
     │
     ▼
-nginx on GCP VM  (port 443, TLS via Let's Encrypt)
-    ├── GET /*            → static client build (sprites, JS, HTML)
-    └── GET /showdown/*   → WebSocket proxy → PS server :8000
+nginx :443  (TLS via Let's Encrypt)
+    ├── /*           → static files served directly from disk
+    │                  /opt/randomon/client/play.pokemonshowdown.com/
+    │                  (index.html, js/, data/, sprites/, fx/)
+    │
+    └── /showdown/*  → reverse-proxy to PS game server on 127.0.0.1:8000
+                       (WebSocket upgrade; SockJS appends its own path segments)
 ```
 
----
-
-## Step 0 — Push client fork to GitHub  *(one-time, do locally first)*
-
-The client (`client/` submodule) has our custom changes but they only exist locally. We need to push them before anything can be deployed.
-
-```bash
-cd /path/to/randomPokemon/client
-
-# 1. Add the patatoa fork as a remote (create the repo on GitHub first: patatoa/randomon-client)
-git remote add patatoa https://github.com/patatoa/randomon-client.git
-
-# 2. Commit all local changes
-git add -A
-git commit -m "Custom client: randomon format, sprites, auth, config"
-
-# 3. Push to the fork
-git push patatoa HEAD:main
-
-# 4. Back in the server repo, update the submodule URL and pin it to the new remote
-cd ..
-git config .gitmodules submodule.client.url https://github.com/patatoa/randomon-client.git
-git submodule sync
-git add .gitmodules client
-git commit -m "Point client submodule to patatoa fork"
-git push origin main
-```
+nginx and the PS server both run on the same VM. The PS server never listens on a public port — only on loopback :8000. nginx terminates TLS and forwards WebSocket traffic.
 
 ---
 
 ## Step 1 — GCP VM
 
-1. GCP Console → Compute Engine → Create Instance
-   - Name: `randomon`
-   - Region: pick closest to your users (us-central1 is free-tier eligible)
-   - Machine type: **e2-micro**
-   - Boot disk: Ubuntu 24.04 LTS, 20GB
-   - Firewall: ✓ Allow HTTP, ✓ Allow HTTPS
-2. Note the **external IP** — you'll need it for DNS.
-3. SSH in (via GCP Console or `gcloud compute ssh randomon`).
+From your local machine (needs `gcloud` CLI, `gcloud auth login` first):
+
+```bash
+# Create the instance (e2-micro is free-tier eligible in us-central1)
+gcloud compute instances create randomon \
+  --zone=us-central1-a \
+  --machine-type=e2-micro \
+  --image-family=ubuntu-2404-lts-amd64 \
+  --image-project=ubuntu-os-cloud \
+  --boot-disk-size=30GB \
+  --boot-disk-type=pd-standard \
+  --tags=http-server,https-server
+
+# Open ports 80 + 443 (these rules apply to all instances with the tags above)
+gcloud compute firewall-rules create allow-http \
+  --allow=tcp:80 --target-tags=http-server --direction=INGRESS 2>/dev/null || true
+gcloud compute firewall-rules create allow-https \
+  --allow=tcp:443 --target-tags=https-server --direction=INGRESS 2>/dev/null || true
+
+# Print the external IP (copy this — you'll use it in Step 2)
+gcloud compute instances describe randomon \
+  --zone=us-central1-a \
+  --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
+
+# SSH in
+gcloud compute ssh randomon --zone=us-central1-a
+```
 
 ---
 
 ## Step 2 — DNS
 
-Add one record at your current registrar:
+At your registrar, add one A record:
 
 | Type | Name | Value | TTL |
 |------|------|-------|-----|
 | A | `randomon` | `<GCP external IP>` | 300 |
 
-> **Cloudflare upgrade path (optional later):** If you ever move `patatoa.com` DNS to Cloudflare, you get free CDN + DDoS protection + WebSocket support automatically. But it's not required — certbot works fine with your current registrar.
+This makes `randomon.patatoa.com` point to the VM.
 
 ---
 
-## Step 3 — Server setup
+## Step 3 — VM base setup
 
 ```bash
-# As root / sudo on the GCP VM
-
+# As root on the VM
 apt update && apt upgrade -y
 apt install -y nginx certbot python3-certbot-nginx git
 
-# Node.js v20 via NodeSource
+# Node.js 20 (LTS)
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 
-# Deploy user
+# Service user
 useradd -m -s /bin/bash randomon
 ```
 
 ---
 
-## Step 4 — Clone repos
+## Step 4 — Clone repo and install deps
 
 ```bash
 su - randomon
 
-# Server
-git clone https://github.com/patatoa/randomon.git /opt/randomon/server
-cd /opt/randomon/server
-git submodule update --init --recursive    # pulls client fork
-npm install
-node build
+git clone https://github.com/patatoa/randomPokemon.git /opt/randomon
+cd /opt/randomon
 
-# Server config
-cp config/config-example.js config/config.js
+# Server deps
+npm install
+
+# Client deps
+cd client
+npm install
+cd ..
 ```
 
-Edit `/opt/randomon/server/config/config.js` — add/set:
+---
+
+## Step 5 — Server config
+
+`/opt/randomon/config/config.js` — create this file (it's gitignored):
+
 ```js
+/* jshint esversion: 9 */
+'use strict';
+
+exports.port = 8000;
 exports.bindaddress = '127.0.0.1';
 exports.proxyip = ['127.0.0.1'];
 exports.noguestsecurity = true;
-exports.port = 8000;
+exports.repl = false;
+exports.forcedformat = 'gen9randomon';
 ```
 
 ---
 
-## Step 5 — Build client
+## Step 6 — Client config and build
 
-> **Critical:** these config files must reflect production values before building.
+**6a. Client config** — copy the committed production template:
 
-`/opt/randomon/server/client/config/routes.json`:
-```json
-{
-    "root": "pokemonshowdown.com",
-    "client": "randomon.patatoa.com",
-    "dex": "dex.pokemonshowdown.com",
-    "replays": "replay.pokemonshowdown.com",
-    "users": "pokemonshowdown.com/users",
-    "teams": "teams.pokemonshowdown.com"
-}
+```bash
+cp /opt/randomon/client/config/config.production.js /opt/randomon/client/config/config.js
 ```
 
-`/opt/randomon/server/client/config/config.js`:
+`config.production.js` already has:
 ```js
-var Config = Config || {};
-Config.version = "0";
-
 Config.defaultserver = {
     id: 'randomon',
     host: 'randomon.patatoa.com',
-    port: 443,
-    httpport: 443,
-    altport: 443,
-    registered: true    // CRITICAL — enables wss:// (required from HTTPS pages)
+    port: 443, httpport: 443, altport: 443,
+    registered: true   // enables wss:// — required for HTTPS pages
 };
-
-Config.customcolors = {};
 ```
 
-Build:
+**6b. Fix routes.json for production** — the committed file has `localhost:8080`; change it to the real domain:
+
 ```bash
-cd /opt/randomon/server/client/play.pokemonshowdown.com
-npm install
-node build
-cp caches/index-new.html index.html
+sed -i 's/localhost:8080/randomon.patatoa.com/' /opt/randomon/client/config/routes.json
+```
+
+This controls the URL prefix for all sprites and assets (`//randomon.patatoa.com/sprites/...`).
+
+**6c. Build the client:**
+
+```bash
+cd /opt/randomon/client
+node build-tools/update full
+# "full" is required — compiles graphics.js and chat-formatter.js; regular build skips them
+
+cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
 ```
 
 ---
 
-## Step 6 — systemd
+## Step 7 — Assets (sprites, FX, data files)
 
-`/etc/systemd/system/randomon.service`:
+Sprites are gitignored (too large for git). They live in a GCS bucket you control — no
+runtime dependency on the PS CDN.
+
+### 7a — One-time: create and populate the bucket *(do this locally, not on the VM)*
+
+You need `download-assets.sh --cdn` to have already run locally so the files exist under
+`client/play.pokemonshowdown.com/`. Then:
+
+```bash
+# From the repo root on your local machine
+bash scripts/upload-assets-to-gcs.sh
+# Creates gs://randomon-assets and pushes sprites/, fx/, and data/ into it.
+# Set RANDOMON_BUCKET=gs://other-name to use a different bucket name.
+```
+
+This is a one-time step. Re-run it only when the pool changes (new Pokémon added to roster).
+
+### 7b — Every VM setup: pull from bucket
+
+```bash
+# On the VM, from /opt/randomon
+bash scripts/download-assets.sh
+# Pulls assets from gs://randomon-assets via gcloud storage rsync.
+```
+
+**VM authentication:** the e2-micro has a default service account. Grant it read access
+to the bucket (run this once from any machine that has GCP permissions):
+
+```bash
+# Get the service account email shown on the VM:
+#   gcloud config get-value account
+gcloud storage buckets add-iam-policy-binding gs://randomon-assets \
+  --member="serviceAccount:<VM_SERVICE_ACCOUNT_EMAIL>" \
+  --role="roles/storage.objectViewer"
+```
+
+---
+
+## Step 8 — systemd service
+
+`/etc/systemd/system/randomon.service` (as root):
+
 ```ini
 [Unit]
 Description=Rando Mon PS Server
@@ -177,7 +231,7 @@ After=network.target
 [Service]
 Type=simple
 User=randomon
-WorkingDirectory=/opt/randomon/server
+WorkingDirectory=/opt/randomon
 ExecStart=/usr/bin/node pokemon-showdown 8000
 Restart=always
 RestartSec=5
@@ -192,21 +246,21 @@ WantedBy=multi-user.target
 ```bash
 systemctl daemon-reload
 systemctl enable --now randomon
-# Verify it started:
-journalctl -u randomon -n 30
+journalctl -u randomon -n 30   # confirm it started
 ```
 
 ---
 
-## Step 7 — nginx
+## Step 9 — nginx
 
-`/etc/nginx/sites-available/randomon`:
+`/etc/nginx/sites-available/randomon` (as root):
+
 ```nginx
 server {
     listen 80;
     server_name randomon.patatoa.com;
 
-    root /opt/randomon/server/client/play.pokemonshowdown.com;
+    root /opt/randomon/client/play.pokemonshowdown.com;
     index index.html;
 
     location /showdown/ {
@@ -234,63 +288,69 @@ nginx -t && systemctl reload nginx
 
 ---
 
-## Step 8 — TLS
+## Step 10 — TLS
 
-DNS must be propagated before running certbot.
+DNS must be propagated first.
 
 ```bash
-# Verify DNS first:
-dig randomon.patatoa.com +short   # should return your GCP IP
+dig +short randomon.patatoa.com   # must return your GCP IP before continuing
 
-# Issue cert:
 certbot --nginx -d randomon.patatoa.com
-
-# Auto-renewal is set up automatically by the certbot package
+# Certbot edits the nginx config automatically and sets up auto-renewal
 ```
-
-Certbot will edit your nginx config to add the SSL block automatically.
 
 ---
 
-## Step 9 — Smoke test
+## Step 11 — Smoke test
 
 ```bash
-# PS server responding
+# PS server up?
 curl http://127.0.0.1:8000
 
-# HTTPS serving correctly
+# HTTPS serving?
 curl -I https://randomon.patatoa.com
 
-# Check logs
+# Server logs
 journalctl -u randomon -f
 ```
 
-Open `https://randomon.patatoa.com` in a browser, open a second tab, challenge yourself — confirm a battle starts with `gen9randomon` and sprites load.
+Open `https://randomon.patatoa.com` in two browser tabs. The Battle button should appear immediately (no "Connecting..."). Challenge the other tab and confirm a battle starts with gen9randomon and sprites load.
 
 ---
 
 ## Redeployment
 
 ```bash
-# Server changes
-cd /opt/randomon/server
-git pull && node build
-systemctl restart randomon
+cd /opt/randomon
 
-# Client changes
-cd /opt/randomon/server/client
+# Pull latest
 git pull
-cd play.pokemonshowdown.com
-node build && cp caches/index-new.html index.html
-# nginx serves files directly — no restart needed
+
+# Rebuild server
+node build
+
+# Rebuild client (only if client src changed)
+cd client
+node build-tools/update full
+cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
+cd ..
+
+# Restart server; nginx picks up static files automatically
+systemctl restart randomon
 ```
 
 ---
 
 ## Checklist
 
-- [ ] **Step 0**: Create `patatoa/randomon-client` on GitHub, push client changes, update submodule
-- [ ] **Step 1**: GCP e2-micro VM created, external IP noted
-- [ ] **Step 2**: A record `randomon` → GCP IP added at registrar
-- [ ] **Steps 3–8**: VM provisioned, repos cloned, services running
-- [ ] **Step 9**: Smoke test passes
+- [ ] Step 1: GCP e2-micro VM created, external IP noted
+- [ ] Step 2: DNS A record `randomon` → GCP IP propagated
+- [ ] Steps 3–4: VM provisioned, repo cloned, deps installed
+- [ ] Step 5: `/opt/randomon/config/config.js` created
+- [ ] Step 6: Client config copied, routes.json updated, client built, index.html in place
+- [ ] Step 7a: GCS bucket created and populated (`scripts/upload-assets-to-gcs.sh`) — one-time, local
+- [ ] Step 7b: Assets pulled on VM (`scripts/download-assets.sh`)
+- [ ] Step 8: systemd service running (`systemctl status randomon`)
+- [ ] Step 9: nginx configured and reloaded
+- [ ] Step 10: TLS cert issued (`certbot --nginx`)
+- [ ] Step 11: Smoke test passes — Battle button visible, match starts

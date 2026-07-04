@@ -126,6 +126,16 @@ export class MainMenuRoom extends PSRoom {
 		case 'challstr': {
 			const [, challstr] = args;
 			PS.user.challstr = challstr;
+			if (!Config.defaultserver.registered) {
+				PS.user.initializing = false;
+				const savedName = PS.user.name;
+				if (toID(savedName)) {
+					PS.user.changeName(savedName);
+				} else {
+					PS.send(`/trn ,0,`);
+				}
+				return;
+			}
 			PSLoginServer.query(
 				'upkeep', { challstr }
 			).then(res => {
