@@ -43,7 +43,8 @@ try {
 	version += ` (${head.slice(0, 8)}${head !== origin ? `/${origin.slice(0, 8)}` : ''})`;
 } catch {}
 
-const routes = JSON.parse(fs.readFileSync('config/routes.json'));
+const routesFile = process.env.PS_ROUTES || 'config/routes.json';
+const routes = JSON.parse(fs.readFileSync(routesFile));
 const autoconfigRegex = new RegExp(`${escapeRegex(AUTOCONFIG_START)}[^]+${escapeRegex(AUTOCONFIG_END)}`);
 const autoconfig = `${AUTOCONFIG_START}
 Config.version = ${JSON.stringify(version)};

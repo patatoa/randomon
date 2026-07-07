@@ -1,5 +1,40 @@
 # Rando Mon — Deployment
 
+## Step 0 — GCP project
+
+Do this from your local machine with the `gcloud` CLI installed.
+
+Pick a globally unique project ID. It can contain lowercase letters, numbers, and hyphens. Example:
+
+```bash
+PROJECT_ID=randomon-prod
+PROJECT_NAME="Rando Mon"
+
+gcloud auth login
+gcloud projects create "$PROJECT_ID" --name="$PROJECT_NAME"
+gcloud config set project "$PROJECT_ID"
+```
+
+Link billing:
+
+```bash
+gcloud billing accounts list
+
+# Copy the billing account ID you want to use, then:
+BILLING_ACCOUNT_ID=<billing-account-id>
+gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT_ID"
+```
+
+Enable required APIs:
+
+```bash
+gcloud services enable compute.googleapis.com storage.googleapis.com
+```
+
+After this, continue with Step 1. Do not update DNS yet; wait until Step 1 prints the VM external IP.
+
+---
+
 ## What lives where
 
 ```
@@ -14,8 +49,8 @@
 │   ├── config/
 │   │   ├── config.js                     ← CLIENT config (gitignored — create on VM)
 │   │   ├── config.production.js          ← template for config.js (committed)
-│   │   ├── routes.json                   ← asset URL roots (committed as localhost:8080 — overwritten in Step 6b)
-│   │   └── routes.production.json        ← production routes (committed; cp'd over routes.json in Step 6b)
+│   │   ├── routes.json                   ← local asset URL roots (committed as localhost:8080)
+│   │   └── routes.production.json        ← production routes used by deploy builds via PS_ROUTES
 │   └── play.pokemonshowdown.com/         ← nginx serves this directory as the website root
 │       ├── index.html                    ← generated: cp caches/index-new.html index.html
 │       ├── sprites/                      ← downloaded by scripts/download-assets.sh (gitignored)
@@ -23,7 +58,7 @@
 │       └── js/                           ← built: client JS bundle
 │
 └── scripts/
-    └── download-assets.sh                ← downloads all sprites + binary assets from PS CDN
+    └── download-assets.sh                ← pulls assets from GCS by default, or from PS CDN with --cdn
 ```
 
 **Traffic flow:**
@@ -49,7 +84,7 @@ nginx and the PS server both run on the same VM. The PS server never listens on 
 From your local machine (needs `gcloud` CLI, `gcloud auth login` first):
 
 ```bash
-# Create the instance (e2-micro is free-tier eligible in us-central1)
+# Create the instance (e2-micro is free-tier eligible in us-central1).
 gcloud compute instances create randomon \
   --zone=us-central1-a \
   --machine-type=e2-micro \
@@ -93,14 +128,27 @@ This makes `randomon.patatoa.com` point to the VM.
 ```bash
 # As root on the VM
 apt update && apt upgrade -y
-apt install -y nginx certbot python3-certbot-nginx git
+apt install -y nginx certbot python3-certbot-nginx git ca-certificates curl gnupg
 
-# Node.js 20 (LTS)
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+# Node.js 22+ is required by this repo's build and startup scripts.
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 apt install -y nodejs
+
+# Google Cloud CLI for `gcloud storage rsync` in scripts/download-assets.sh.
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg
+echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  > /etc/apt/sources.list.d/google-cloud-sdk.list
+apt update
+apt install -y google-cloud-cli
 
 # Service user
 useradd -m -s /bin/bash randomon
+
+# Deployment directory owned by the service user.
+mkdir -p /opt/randomon
+chown randomon:randomon /opt/randomon
 ```
 
 ---
@@ -108,18 +156,25 @@ useradd -m -s /bin/bash randomon
 ## Step 4 — Clone repo and install deps
 
 ```bash
+# As the randomon user
 su - randomon
 
 git clone https://github.com/patatoa/randomPokemon.git /opt/randomon
 cd /opt/randomon
 
 # Server deps
-npm install
+npm ci
 
 # Client deps
 cd client
-npm install
+npm ci
 cd ..
+
+# Runtime log files expected by the server at startup and during lobby activity.
+mkdir -p /opt/randomon/logs /opt/randomon/logs/repl
+touch /opt/randomon/logs/chatlog-access.txt \
+  /opt/randomon/logs/responder.jsonl \
+  /opt/randomon/logs/errors.txt
 ```
 
 ---
@@ -154,25 +209,22 @@ cp /opt/randomon/client/config/config.production.js /opt/randomon/client/config/
 ```js
 Config.defaultserver = {
     id: 'randomon',
+    protocol: 'https',
     host: 'randomon.patatoa.com',
     port: 443, httpport: 443, altport: 443,
-    registered: true   // enables wss:// — required for HTTPS pages
+    registered: false  // local names; do not require real Pokémon Showdown passwords
 };
 ```
 
-**6b. Install production routes** — the committed `routes.json` has `localhost:8080`; replace it with the production copy:
+**6b. Production routes** — local builds use committed `client/config/routes.json` (`localhost:8080`). Deploy builds use `client/config/routes.production.json` through `PS_ROUTES`, so the VM working tree stays clean.
 
-```bash
-cp /opt/randomon/client/config/routes.production.json /opt/randomon/client/config/routes.json
-```
-
-This controls the URL prefix for all sprites and assets (`//randomon.patatoa.com/sprites/...`). The `cp` keeps `routes.json` untracked in git (no dirty working tree on future `git pull`).
+This controls the URL prefix for all sprites and assets (`//randomon.patatoa.com/sprites/...`). The default local path remains unchanged for development.
 
 **6c. Build the client:**
 
 ```bash
 cd /opt/randomon/client
-node build-tools/update full
+PS_ROUTES=config/routes.production.json node build-tools/update full
 # "full" is required — compiles graphics.js and chat-formatter.js; regular build skips them
 
 cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
@@ -182,8 +234,7 @@ cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index
 
 ## Step 7 — Assets (sprites, FX, data files)
 
-Sprites are gitignored (too large for git). They live in a GCS bucket you control — no
-runtime dependency on the PS CDN.
+Sprites are gitignored (too large for git). They live in a public GCS bucket you control — no runtime dependency on the PS CDN.
 
 ### 7a — One-time: create and populate the bucket *(do this locally, not on the VM)*
 
@@ -192,9 +243,8 @@ You need `download-assets.sh --cdn` to have already run locally so the files exi
 
 ```bash
 # From the repo root on your local machine
-bash scripts/upload-assets-to-gcs.sh
-# Creates gs://randomon-assets and pushes sprites/, fx/, and data/ into it.
-# Set RANDOMON_BUCKET=gs://other-name to use a different bucket name.
+RANDOMON_BUCKET=gs://<your-randomon-assets-bucket> bash scripts/upload-assets-to-gcs.sh
+# Creates the public bucket if needed and pushes sprites/, fx/, and data/ into it.
 ```
 
 This is a one-time step. Re-run it only when the pool changes (new Pokémon added to roster).
@@ -203,23 +253,13 @@ This is a one-time step. Re-run it only when the pool changes (new Pokémon adde
 
 ```bash
 # On the VM, from /opt/randomon
-bash scripts/download-assets.sh
-# Pulls assets from gs://randomon-assets via gcloud storage rsync.
+su - randomon
+cd /opt/randomon
+RANDOMON_BUCKET=gs://<your-randomon-assets-bucket> bash scripts/download-assets.sh
+# Pulls assets from the configured bucket via gcloud storage rsync or gsutil.
 ```
 
-**VM authentication:** the e2-micro has a default service account. Grant it read access
-to the bucket (run this once from any machine that has GCP permissions):
-
-```bash
-# Get the VM's default service account email (format: <project-number>-compute@developer.gserviceaccount.com)
-PROJECT_ID=$(gcloud config get-value project)
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='get(projectNumber)')
-SA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-
-gcloud storage buckets add-iam-policy-binding gs://randomon-assets \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/storage.objectViewer"
-```
+The bucket is public-read, so the VM does not need bucket-specific IAM. The VM still needs `google-cloud-cli` installed because `scripts/download-assets.sh` uses `gcloud storage rsync`.
 
 ---
 
@@ -236,7 +276,9 @@ After=network.target
 Type=simple
 User=randomon
 WorkingDirectory=/opt/randomon
-ExecStart=/usr/bin/node pokemon-showdown 8000
+ExecStartPre=/usr/bin/mkdir -p /opt/randomon/logs /opt/randomon/logs/repl
+ExecStartPre=/usr/bin/touch /opt/randomon/logs/chatlog-access.txt /opt/randomon/logs/responder.jsonl /opt/randomon/logs/errors.txt
+ExecStart=/usr/bin/node pokemon-showdown --skip-build 8000
 Restart=always
 RestartSec=5
 StandardInput=null
@@ -266,6 +308,13 @@ server {
 
     root /opt/randomon/client/play.pokemonshowdown.com;
     index index.html;
+
+    location /~~randomon/ {
+        proxy_pass https://play.pokemonshowdown.com;
+        proxy_ssl_server_name on;
+        proxy_set_header Host play.pokemonshowdown.com;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
 
     location /showdown/ {
         proxy_pass http://127.0.0.1:8000;
@@ -325,21 +374,25 @@ Open `https://randomon.patatoa.com` in two browser tabs. The Battle button shoul
 ## Redeployment
 
 ```bash
+# As the randomon user.
+su - randomon
 cd /opt/randomon
 
-# Pull latest
 git pull
 
-# Rebuild server
+# Reinstall dependencies after pulls that change package-lock.json.
+npm ci
 node build
 
-# Rebuild client (only if client src changed)
 cd client
-node build-tools/update full
-cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
-cd ..
+npm ci
 
-# Restart server; nginx picks up static files automatically
+# Rebuild client.
+PS_ROUTES=config/routes.production.json node build-tools/update full
+cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
+exit
+
+# Restart as root; nginx picks up static files automatically.
 systemctl restart randomon
 ```
 
@@ -351,7 +404,7 @@ systemctl restart randomon
 - [ ] Step 2: DNS A record `randomon` → GCP IP propagated
 - [ ] Steps 3–4: VM provisioned, repo cloned, deps installed
 - [ ] Step 5: `/opt/randomon/config/config.js` created
-- [ ] Step 6: Client config copied, routes.json updated, client built, index.html in place
+- [ ] Step 6: Client config copied, production routes selected with `PS_ROUTES`, client built, index.html in place
 - [ ] Step 7a: GCS bucket created and populated (`scripts/upload-assets-to-gcs.sh`) — one-time, local
 - [ ] Step 7b: Assets pulled on VM (`scripts/download-assets.sh`)
 - [ ] Step 8: systemd service running (`systemctl status randomon`)

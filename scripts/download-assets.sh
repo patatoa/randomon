@@ -7,26 +7,41 @@
 # --cdn flag (local dev / initial bucket population): pulls from PS CDN.
 #   bash scripts/download-assets.sh --cdn
 #
-# Set RANDOMON_BUCKET to override the default bucket name.
+# Set RANDOMON_BUCKET to the asset bucket, for example:
+#   RANDOMON_BUCKET=gs://your-randomon-assets bash scripts/download-assets.sh
 # Run from the repo root.
 
 set -e
 
-BUCKET="${RANDOMON_BUCKET:-gs://randomon-assets}"
 CLIENT="client/play.pokemonshowdown.com"
 
 # ── GCS mode (default) ────────────────────────────────────────────────────────
 
 if [ "${1:-}" != "--cdn" ]; then
-  if ! command -v gcloud &>/dev/null; then
-    echo "ERROR: gcloud not found. Install the Google Cloud SDK or run with --cdn."
+  if [ -z "${RANDOMON_BUCKET:-}" ]; then
+    echo "ERROR: RANDOMON_BUCKET must be set, for example:"
+    echo "       RANDOMON_BUCKET=gs://your-randomon-assets bash scripts/download-assets.sh"
+    exit 1
+  fi
+  BUCKET="$RANDOMON_BUCKET"
+
+  if command -v gcloud &>/dev/null && gcloud storage --help &>/dev/null; then
+    storage_rsync() {
+      gcloud storage rsync -r "$1" "$2"
+    }
+  elif command -v gsutil &>/dev/null; then
+    storage_rsync() {
+      gsutil -m rsync -r "$1" "$2"
+    }
+  else
+    echo "ERROR: gcloud storage or gsutil not found. Install the Google Cloud SDK or run with --cdn."
     exit 1
   fi
   echo "==> Pulling assets from ${BUCKET}..."
   mkdir -p "$CLIENT/sprites" "$CLIENT/fx" "$CLIENT/data"
-  gcloud storage rsync -r "${BUCKET}/sprites" "$CLIENT/sprites"
-  gcloud storage rsync -r "${BUCKET}/fx"      "$CLIENT/fx"
-  gcloud storage rsync -r "${BUCKET}/data"    "$CLIENT/data"
+  storage_rsync "${BUCKET}/sprites" "$CLIENT/sprites"
+  storage_rsync "${BUCKET}/fx"      "$CLIENT/fx"
+  storage_rsync "${BUCKET}/data"    "$CLIENT/data"
   echo "==> Done."
   exit 0
 fi
