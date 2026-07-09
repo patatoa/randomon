@@ -190,6 +190,7 @@ touch /opt/randomon/logs/chatlog-access.txt \
 exports.port = 8000;
 exports.bindaddress = '127.0.0.1';
 exports.proxyip = ['127.0.0.1'];
+exports.noipchecks = true;
 exports.noguestsecurity = true;
 exports.repl = false;
 exports.forcedformat = 'gen9randomon';

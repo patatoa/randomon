@@ -1,99 +1,139 @@
-Pokémon Showdown
-========================================================================
+# Randomon
 
-Navigation: [Website][1] | **Server repository** | [Client repository][2] | [Dex repository][3]
+Randomon is a small, self-hosted Pokemon Showdown fork for playing one custom
+format: **[Gen 9] Rando Mon**.
 
-  [1]: http://pokemonshowdown.com/
-  [2]: https://github.com/smogon/pokemon-showdown-client
-  [3]: https://github.com/Zarel/Pokemon-Showdown-Dex
+The format gives each player a random team drawn from a curated 457-Pokemon
+pool. Box legendaries are excluded, and sets/Tera types are hand-tuned by role.
+The public site is intended to be simple: choose a local name, find or challenge
+an opponent, and play Randomon.
 
-[![Build Status](https://github.com/smogon/pokemon-showdown/workflows/Node.js%20CI/badge.svg)](https://github.com/smogon/pokemon-showdown/actions?query=workflow%3A%22Node.js+CI%22)
-[![Dependency Status](https://img.shields.io/librariesio/github/smogon/pokemon-showdown)](https://libraries.io/github/smogon/pokemon-showdown)
+## Project Status
 
+This repo is a working fork, not a clean upstream Pokemon Showdown distribution.
+It includes both the server and the web client so local development and the
+deployed site can use the same codebase.
 
-Introduction
-------------------------------------------------------------------------
+Current production target:
 
-Pokémon Showdown is many things:
+- Site: `https://randomon.patatoa.com`
+- Server format: `gen9randomon`
+- Static assets: served from the same site after being populated from the
+  Randomon GCS asset bucket
+- Deployment guide: [DEPLOY.md](./DEPLOY.md)
 
-- A **website** you can use for Pokémon battling
+## What Is Customized
 
-  - http://pokemonshowdown.com/
+- Custom format definition: [config/custom-formats.ts](./config/custom-formats.ts)
+- Custom game data/mod: [data/mods/randomon](./data/mods/randomon)
+- Main menu battle button: [client/play.pokemonshowdown.com/src/panel-mainmenu.tsx](./client/play.pokemonshowdown.com/src/panel-mainmenu.tsx)
+- Direct challenge defaults: [client/play.pokemonshowdown.com/src/panel-chat.tsx](./client/play.pokemonshowdown.com/src/panel-chat.tsx)
+- Production client config template: [client/config/config.production.js](./client/config/config.production.js)
+- Asset helpers: [scripts/download-assets.sh](./scripts/download-assets.sh) and
+  [scripts/upload-assets-to-gcs.sh](./scripts/upload-assets-to-gcs.sh)
 
-- A **JavaScript library** for simulating Pokémon battles and getting Pokédex data
+## Local Development
 
-  - [sim/README.md](./sim/README.md)
+Install dependencies from the repo root:
 
-- Some **command-line tools** for simulating Pokémon battles (which can be used in non-JavaScript programs)
+```bash
+npm ci
+cd client
+npm ci
+cd ..
+```
 
-  - [COMMANDLINE.md](./COMMANDLINE.md)
+Build the server and client:
 
-- A **web API** for the web site for Pokémon battling
+```bash
+node build
+cd client
+node build-tools/update full
+cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
+cd ..
+```
 
-  - [pokemon-showdown-client: WEB-API.md](https://github.com/smogon/pokemon-showdown-client/blob/master/WEB-API.md)
+Start the Pokemon Showdown server:
 
-- A **game server** for hosting your own Pokémon Showdown community and game modes
+```bash
+node pokemon-showdown --skip-build 8000
+```
 
-  - [server/README.md](./server/README.md)
+Serve the client from `client/play.pokemonshowdown.com` on port 8080:
 
-Pokémon Showdown simulates singles, doubles and triples battles in all the games out so far (Generations 1 through 9).
+```bash
+cd client/play.pokemonshowdown.com
+npx http-server -p 8080
+```
 
+Then open:
 
-Documentation quick links
-------------------------------------------------------------------------
+```text
+http://localhost:8080
+```
 
-* [PROTOCOL.md][4] - How the client and server communicate with each other.
-* [sim/SIM-PROTOCOL.md][5] - The part of the protocol used for battles and battle messages.
-* [CONTRIBUTING.md][6] - Useful code standards to understand if you want to send pull requests to PS (not necessary if you're just using the code and not planning to contribute back).
-* [ARCHITECTURE.md][7] - A high-level overview of how the code works.
-* [Bot FAQ][8] - An FAQ compiled by Kaiepi regarding making Pokemon Showdown bots - mainly chatbots and battle bots.
+The local client routes are configured for `localhost:8080` and the local server
+uses port `8000`.
 
-  [4]: ./PROTOCOL.md
-  [5]: ./sim/SIM-PROTOCOL.md
-  [6]: ./CONTRIBUTING.md
-  [7]: ./ARCHITECTURE.md
-  [8]: https://gist.github.com/Kaiepi/becc5d0ecd576f5e7733b57b4e3fa97e
+## Assets
 
+Sprites, battle effects, and generated client data are too large or too noisy to
+track directly in git. They are expected under:
 
-Community
-------------------------------------------------------------------------
+```text
+client/play.pokemonshowdown.com/sprites/
+client/play.pokemonshowdown.com/fx/
+client/play.pokemonshowdown.com/data/
+```
 
-PS has a built-in chat service. Join our main server to talk to us!
+Use the helper scripts from the repo root:
 
-You can also visit the [Pokémon Showdown forums][9] for discussion and help.
+```bash
+# Pull from the configured Randomon asset bucket.
+RANDOMON_BUCKET=gs://<bucket-name> bash scripts/download-assets.sh
 
-  [9]: https://www.smogon.com/forums/forums/pok%C3%A9mon-showdown.209/
+# Rebuild/populate the bucket after local asset changes.
+RANDOMON_BUCKET=gs://<bucket-name> bash scripts/upload-assets-to-gcs.sh
+```
 
-If you'd like to contribute to programming and don't know where to start, feel free to check out [Ideas for New Developers][10].
+For a first-time local bootstrap without the bucket, the download script can pull
+from the Pokemon Showdown CDN:
 
-  [10]: https://github.com/smogon/pokemon-showdown/issues/2444
+```bash
+bash scripts/download-assets.sh --cdn
+```
 
+Do not commit bucket names, project IDs, or other deployment-specific values to
+the public repo.
 
-License
-------------------------------------------------------------------------
+## Deployment
 
-Pokémon Showdown's server is distributed under the terms of the [MIT License][11].
+Deployment is documented in [DEPLOY.md](./DEPLOY.md). The current production
+shape is:
 
-  [11]: ./LICENSE
+- GCP Compute Engine VM
+- nginx for HTTPS/static files/WebSocket proxying
+- systemd service running `node pokemon-showdown --skip-build 8000`
+- public GCS bucket for bulk static assets
+- DNS managed outside Cloudflare
 
+The VM's live server config is intentionally gitignored and created at:
 
-Credits
-------------------------------------------------------------------------
+```text
+/opt/randomon/config/config.js
+```
 
-Owner
+## Upstream Pokemon Showdown
 
-- Guangcong Luo [Zarel] - Development, Design, Sysadmin
+Randomon is based on Pokemon Showdown. Most simulator, protocol, battle, and
+client architecture documentation from upstream still applies:
 
-Staff
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
+- [PROTOCOL.md](./PROTOCOL.md)
+- [sim/README.md](./sim/README.md)
+- [server/README.md](./server/README.md)
+- [client/README.md](./client/README.md)
 
-- Andrew Werner [HoeenHero] - Development
-- Annika L. [Annika] - Development
-- Chris Monsanto [chaos] - Development, Sysadmin
-- Kris Johnson [dhelmise] - Development
-- Leonard Craft III [DaWoblefet] - Research (game mechanics)
-- Mathieu Dias-Martins [Marty-D] - Research (game mechanics), Development
-- Mia A [Cassiopeia] - Development
-
-Contributors
-
-- See http://pokemonshowdown.com/credits
+Upstream Pokemon Showdown server code is MIT licensed. The bundled client code
+retains its upstream license. See [LICENSE](./LICENSE) and the client package
+metadata for details.

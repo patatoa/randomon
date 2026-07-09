@@ -549,6 +549,7 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 		this.base?.querySelector<HTMLButtonElement>('.formatselect')?.focus();
 	}
 	submitSearch = (ev: Event, format: string, team?: Team) => {
+		ev.preventDefault();
 		if (!PS.user.named) {
 			PS.join('login' as RoomID, {
 				parentElem: this.base!.querySelector<HTMLElement>('.big.button'),
@@ -556,6 +557,16 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 			return;
 		}
 		PS.mainmenu.startSearch(format, team, ev.target as HTMLElement);
+	};
+	submitRandomonSearch = (ev: Event) => {
+		ev.preventDefault();
+		if (!PS.user.named) {
+			PS.join('login' as RoomID, {
+				parentElem: this.base!.querySelector<HTMLElement>('.big.button'),
+			});
+			return;
+		}
+		PS.mainmenu.startSearch('gen9randomon', undefined, ev.currentTarget as HTMLElement);
 	};
 	handleDragStart = (e: DragEvent) => {
 		const room = PS.getRoom(e.currentTarget);
@@ -672,10 +683,7 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 			</TeamForm>;
 		}
 
-		return <TeamForm
-			class="menugroup" format={PS.mainmenu.searchingFormat() || undefined}
-			selectType="search" onSubmit={this.submitSearch}
-		>
+		return <div class="menugroup">
 			<p>
 				<button class="button small" data-href="battleoptions" title="Options" aria-label="Options">
 					Battle options <i class="fa fa-caret-down"></i>
@@ -695,12 +703,12 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 					<p class="buttonbar"><button class="button" data-cmd="/cancelsearch">Cancel</button></p>
 				</>
 			) : (
-				<button class="mainmenu1 mainmenu big button" onClick={e => this.submitSearch(e, 'gen9randomon', undefined)}>
+				<button class="mainmenu1 mainmenu big button" onClick={this.submitRandomonSearch}>
 					<strong>Battle!</strong><br />
 					<small>Find a random opponent</small>
 				</button>
 			)}
-		</TeamForm>;
+		</div>;
 	}
 	renderBackgroundCredit() {
 		const attrib = PSBackground.attrib;
