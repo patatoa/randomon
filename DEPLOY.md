@@ -38,7 +38,7 @@ After this, continue with Step 1. Do not update DNS yet; wait until Step 1 print
 ## What lives where
 
 ```
-/opt/randomon/                            ← git clone of patatoa/randomPokemon
+/opt/randomon/                            ← git clone of patatoa/randomon
 │
 ├── pokemon-showdown                      ← PS game server entry point
 ├── config/
@@ -159,7 +159,7 @@ chown randomon:randomon /opt/randomon
 # As the randomon user
 su - randomon
 
-git clone https://github.com/patatoa/randomPokemon.git /opt/randomon
+git clone https://github.com/patatoa/randomon.git /opt/randomon
 cd /opt/randomon
 
 # Server deps
@@ -374,28 +374,188 @@ Open `https://randomon.patatoa.com` in two browser tabs. The Battle button shoul
 
 ## Redeployment
 
+Production deployment is handled by the `Deploy Randomon Production` GitHub
+Actions workflow in `.github/workflows/deploy-production.yml`.
+
+The workflow runs automatically after a push to `master` and can also be run
+manually with **Actions → Deploy Randomon Production → Run workflow**. It deploys
+the exact commit for the workflow run, prevents overlapping production deploys,
+builds the server and client on the VM, restarts `randomon`, and checks local and
+public health endpoints.
+
+The workflow intentionally fails if `/opt/randomon` is not already a clean Git
+checkout of `https://github.com/patatoa/randomon.git`. It does not delete,
+replace, or convert the production directory.
+
+### Required GitHub secrets
+
+Configure these as repository secrets or production environment secrets:
+
+| Secret | Purpose |
+|--------|---------|
+| `RANDOMON_DEPLOY_HOST` | Production SSH host, for example `randomon.patatoa.com`. |
+| `RANDOMON_DEPLOY_USER` | Dedicated SSH deployment user. |
+| `RANDOMON_DEPLOY_SSH_KEY` | Private key for the deployment user. |
+| `RANDOMON_DEPLOY_KNOWN_HOSTS` | Pinned `known_hosts` line for the production host. |
+| `RANDOMON_DEPLOY_PORT` | Optional SSH port. Defaults to `22`. |
+
+Create `RANDOMON_DEPLOY_KNOWN_HOSTS` from a trusted machine:
+
 ```bash
-# As the randomon user.
-su - randomon
-cd /opt/randomon
-
-git pull
-
-# Reinstall dependencies after pulls that change package-lock.json.
-npm ci
-node build
-
-cd client
-npm ci
-
-# Rebuild client.
-PS_ROUTES=config/routes.production.json node build-tools/update full
-cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
-exit
-
-# Restart as root; nginx picks up static files automatically.
-systemctl restart randomon
+ssh-keyscan -H randomon.patatoa.com
 ```
+
+Verify the fingerprint out of band before saving it as a secret.
+
+### One-time checkout conversion
+
+Current production note: `/opt/randomon` may be an older file-copy deployment
+directory instead of a Git checkout. Convert it manually and carefully before
+expecting the GitHub workflow to succeed.
+
+Do this from an admin shell on the VM:
+
+```bash
+# Stop the service only when you are ready for the final switch.
+sudo systemctl stop randomon
+
+# Preserve the current production directory.
+sudo mv /opt/randomon /opt/randomon.pre-git.$(date +%Y%m%d%H%M%S)
+
+# Clone a fresh checkout owned by the service user.
+sudo -u randomon git clone https://github.com/patatoa/randomon.git /opt/randomon
+cd /opt/randomon
+sudo -u randomon git checkout master
+
+# Restore live-only files and runtime data from the preserved directory.
+OLD=/opt/randomon.pre-git.<timestamp>
+sudo -u randomon mkdir -p /opt/randomon/config /opt/randomon/client/config /opt/randomon/logs
+sudo -u randomon cp "$OLD/config/config.js" /opt/randomon/config/config.js
+sudo -u randomon cp "$OLD/client/config/config.js" /opt/randomon/client/config/config.js
+sudo -u randomon cp -a "$OLD/logs/." /opt/randomon/logs/
+
+# Preserve downloaded assets when they already exist locally.
+sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/sprites" \
+  /opt/randomon/client/play.pokemonshowdown.com/ 2>/dev/null || true
+sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/fx" \
+  /opt/randomon/client/play.pokemonshowdown.com/ 2>/dev/null || true
+sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/data" \
+  /opt/randomon/client/play.pokemonshowdown.com/ 2>/dev/null || true
+
+# Rebuild and verify before restarting.
+sudo -u randomon npm ci
+sudo -u randomon node build
+sudo -u randomon bash -lc '
+  cd /opt/randomon/client &&
+  npm ci &&
+  PS_ROUTES=config/routes.production.json node build-tools/update full &&
+  cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
+'
+
+sudo systemctl start randomon
+sudo systemctl is-active randomon
+curl -fsS http://127.0.0.1:8000/showdown/info
+curl -fsSI https://randomon.patatoa.com
+```
+
+Only remove the preserved `/opt/randomon.pre-git.*` directory after a successful
+workflow deployment and smoke test.
+
+### Live-only config check
+
+The production server config is `/opt/randomon/config/config.js` and is
+gitignored. Confirm these values after the checkout conversion and after deploys
+that touch matchmaking:
+
+```js
+exports.proxyip = ['127.0.0.1'];
+exports.noipchecks = true;
+exports.noguestsecurity = true;
+exports.forcedformat = 'gen9randomon';
+```
+
+`exports.noipchecks = true` is required for two players behind the same public
+IP, including two local browser tabs, to match each other.
+
+### Deployment SSH user and sudo
+
+Recommended setup: install the deployment SSH key for the `randomon` service
+user and set `RANDOMON_DEPLOY_USER=randomon`. Git operations and builds then run
+directly as `randomon`, and sudo is needed only for service restart and
+diagnostics.
+
+```sudoers
+Cmnd_Alias RANDOMON_SYSTEMD = /bin/systemctl restart randomon, \
+  /bin/systemctl is-active randomon, \
+  /bin/systemctl status randomon --no-pager
+Cmnd_Alias RANDOMON_JOURNAL = /bin/journalctl -u randomon -n 100 --no-pager
+
+randomon ALL=(root) NOPASSWD: RANDOMON_SYSTEMD, RANDOMON_JOURNAL
+```
+
+Adjust `/bin/systemctl` and `/bin/journalctl` paths if `command -v systemctl` or
+`command -v journalctl` shows different paths on the VM. Do not grant
+`NOPASSWD: ALL`.
+
+If you choose a separate deployment user instead of `randomon`, it must also be
+allowed to run the repository Git, npm, Node, test, copy, and client build
+commands as `randomon`. Keep that policy scoped to `/opt/randomon`; do not grant
+unrestricted root sudo.
+
+### What each workflow deployment does
+
+For every automatic or manual deployment, the workflow:
+
+1. Validates required GitHub secrets before SSH.
+2. Connects with strict SSH host-key checking.
+3. Verifies `/opt/randomon/.git` exists.
+4. Verifies the Git origin is `https://github.com/patatoa/randomon.git`.
+5. Fails if tracked production files are dirty, except for the generated
+   `client/play.pokemonshowdown.com/index.html` promotion from the previous
+   production build.
+6. Fetches and checks out the exact workflow SHA.
+7. Runs `npm ci` and `node build` from `/opt/randomon`.
+8. Runs `npm ci` from `/opt/randomon/client`.
+9. Runs `PS_ROUTES=config/routes.production.json node build-tools/update full`.
+10. Copies `play.pokemonshowdown.com/caches/index-new.html` to
+    `play.pokemonshowdown.com/index.html`.
+11. Restarts `randomon`.
+12. Verifies `systemctl is-active randomon`.
+13. Checks `http://127.0.0.1:8000/showdown/info`.
+14. Checks `https://randomon.patatoa.com`.
+15. Checks `https://randomon.patatoa.com/showdown/info`.
+
+The workflow never runs `git clean`, so gitignored production configuration,
+logs, downloaded sprites, effects, and other runtime files are preserved. The
+only tracked file the workflow may reset before checkout is
+`client/play.pokemonshowdown.com/index.html`, because production deploys
+regenerate it from `caches/index-new.html`.
+
+### Failure recovery
+
+The workflow exits nonzero on checkout, dependency, build, restart, or health
+failure. Failed restart and health-check stages print `systemctl status randomon`
+and recent `journalctl -u randomon` output in the workflow logs.
+
+Common fixes:
+
+- Non-Git `/opt/randomon`: complete the one-time checkout conversion above.
+- Unexpected Git origin: correct the remote with
+  `sudo -u randomon git -C /opt/randomon remote set-url origin https://github.com/patatoa/randomon.git`.
+- Dirty tracked files: inspect
+  `sudo -u randomon git -C /opt/randomon status --short --untracked-files=no`
+  and either commit, revert, or manually preserve the change before retrying.
+- Missing `index-new.html`: rerun the client build command locally on the VM and
+  inspect its failure output.
+- Failed health checks: inspect `journalctl -u randomon -n 100 --no-pager` and
+  nginx logs, then rerun the same workflow after fixing the issue.
+
+### Manual rollback
+
+Automatic rollback is intentionally out of scope. To roll back, dispatch the
+deployment workflow for a previously known-good commit from `master`, or SSH to
+the VM and check out that SHA manually, then run the same build, index promotion,
+restart, and health checks listed above.
 
 ---
 

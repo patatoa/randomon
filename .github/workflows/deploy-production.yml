@@ -1,0 +1,239 @@
+name: Deploy Randomon Production
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: randomon-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy production
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+
+    env:
+      APP_DIR: /opt/randomon
+      DEPLOY_SHA: ${{ github.sha }}
+      EXPECTED_REPOSITORY: https://github.com/patatoa/randomon.git
+      LOCAL_HEALTH_URL: http://127.0.0.1:8000/showdown/info
+      PUBLIC_HEALTH_URL: https://randomon.patatoa.com
+      PUBLIC_SHOWDOWN_URL: https://randomon.patatoa.com/showdown/info
+      SERVICE_NAME: randomon
+
+    steps:
+      - name: Validate deployment secrets
+        id: secrets
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.RANDOMON_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.RANDOMON_DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.RANDOMON_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.RANDOMON_DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PORT: ${{ secrets.RANDOMON_DEPLOY_PORT }}
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for name in RANDOMON_DEPLOY_HOST:DEPLOY_HOST RANDOMON_DEPLOY_USER:DEPLOY_USER RANDOMON_DEPLOY_SSH_KEY:DEPLOY_SSH_KEY RANDOMON_DEPLOY_KNOWN_HOSTS:DEPLOY_KNOWN_HOSTS; do
+            secret_name="${name%%:*}"
+            env_name="${name##*:}"
+            if [[ -z "${!env_name}" ]]; then
+              echo "::error::Missing required secret ${secret_name}"
+              missing=1
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+          port="${DEPLOY_PORT:-22}"
+          if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+            echo "::error::RANDOMON_DEPLOY_PORT must be numeric when set"
+            exit 1
+          fi
+
+          echo "port=$port" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.RANDOMON_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.RANDOMON_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/randomon_deploy_key
+          chmod 600 ~/.ssh/randomon_deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy exact commit on production VM
+        id: deploy
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.RANDOMON_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.RANDOMON_DEPLOY_USER }}
+          DEPLOY_PORT: ${{ steps.secrets.outputs.port }}
+        run: |
+          set -euo pipefail
+
+          ssh -i ~/.ssh/randomon_deploy_key \
+            -p "$DEPLOY_PORT" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_DIR='$APP_DIR' DEPLOY_SHA='$DEPLOY_SHA' EXPECTED_REPOSITORY='$EXPECTED_REPOSITORY' LOCAL_HEALTH_URL='$LOCAL_HEALTH_URL' PUBLIC_HEALTH_URL='$PUBLIC_HEALTH_URL' PUBLIC_SHOWDOWN_URL='$PUBLIC_SHOWDOWN_URL' SERVICE_NAME='$SERVICE_NAME' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+
+          stage="initializing"
+
+          diagnostics() {
+            status=$?
+            echo "::error::Deployment failed during: ${stage}"
+            if command -v sudo >/dev/null 2>&1; then
+              echo "---- systemctl status ${SERVICE_NAME} ----"
+              sudo -n systemctl status "$SERVICE_NAME" --no-pager || true
+              echo "---- recent journal ${SERVICE_NAME} ----"
+              sudo -n journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+            fi
+            exit "$status"
+          }
+
+          trap diagnostics ERR
+
+          run_as_app() {
+            if [[ "$(id -un)" == "randomon" ]]; then
+              "$@"
+            else
+              sudo -n -u randomon "$@"
+            fi
+          }
+
+          run_as_app_shell() {
+            if [[ "$(id -un)" == "randomon" ]]; then
+              bash -lc "$1"
+            else
+              sudo -n -u randomon bash -lc "$1"
+            fi
+          }
+
+          retry_curl() {
+            local url="$1"
+            local label="$2"
+            local attempt
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if curl --fail --silent --show-error --max-time 10 "$url" >/tmp/randomon-health.out 2>/tmp/randomon-health.err; then
+                echo "${label} health check passed"
+                return 0
+              fi
+              echo "${label} health check attempt ${attempt} failed"
+              cat /tmp/randomon-health.err || true
+              sleep 3
+            done
+            echo "::error::${label} health check failed: ${url}"
+            cat /tmp/randomon-health.err || true
+            return 1
+          }
+
+          stage="checkout preflight"
+          if [[ ! -d "$APP_DIR/.git" ]]; then
+            echo "::error::$APP_DIR is not a Git checkout. Follow DEPLOY.md one-time checkout conversion before using this workflow."
+            exit 1
+          fi
+
+          cd "$APP_DIR"
+
+          origin="$(run_as_app git -C "$APP_DIR" remote get-url origin)"
+          normalized_origin="${origin%.git}.git"
+          normalized_expected="${EXPECTED_REPOSITORY%.git}.git"
+          if [[ "$normalized_origin" != "$normalized_expected" ]]; then
+            echo "::error::Unexpected Git origin for $APP_DIR. Expected $EXPECTED_REPOSITORY, found $origin."
+            exit 1
+          fi
+
+          generated_index="client/play.pokemonshowdown.com/index.html"
+          tracked_status="$(run_as_app git -C "$APP_DIR" status --porcelain --untracked-files=no)"
+          if [[ -n "$tracked_status" ]]; then
+            if [[ "$tracked_status" == " M $generated_index" ]]; then
+              echo "Resetting generated production index before checkout: $generated_index"
+              run_as_app git -C "$APP_DIR" checkout -- "$generated_index"
+            else
+              echo "::error::Tracked production files have unexpected changes. Commit, stash, or resolve them before deploying."
+              echo "$tracked_status"
+              exit 1
+            fi
+          fi
+
+          stage="fetch exact commit"
+          run_as_app git -C "$APP_DIR" fetch --prune origin "$DEPLOY_SHA"
+          run_as_app git -C "$APP_DIR" checkout --detach "$DEPLOY_SHA"
+          deployed="$(run_as_app git -C "$APP_DIR" rev-parse HEAD)"
+          if [[ "$deployed" != "$DEPLOY_SHA" ]]; then
+            echo "::error::Remote checkout is $deployed, expected $DEPLOY_SHA."
+            exit 1
+          fi
+
+          stage="server dependency installation"
+          run_as_app npm ci
+
+          stage="server build"
+          run_as_app node build
+
+          stage="client dependency installation"
+          run_as_app_shell "cd '$APP_DIR/client' && npm ci"
+
+          stage="client production build"
+          run_as_app_shell "cd '$APP_DIR/client' && PS_ROUTES=config/routes.production.json node build-tools/update full"
+
+          stage="generated index promotion"
+          run_as_app test -f "$APP_DIR/client/play.pokemonshowdown.com/caches/index-new.html"
+          run_as_app cp \
+            "$APP_DIR/client/play.pokemonshowdown.com/caches/index-new.html" \
+            "$APP_DIR/client/play.pokemonshowdown.com/index.html"
+
+          stage="service restart"
+          sudo -n systemctl restart "$SERVICE_NAME"
+
+          stage="service verification"
+          sudo -n systemctl is-active "$SERVICE_NAME" >/dev/null
+
+          stage="local health verification"
+          retry_curl "$LOCAL_HEALTH_URL" "Local Showdown"
+
+          stage="public HTTPS verification"
+          retry_curl "$PUBLIC_HEALTH_URL" "Public site"
+
+          stage="public Showdown verification"
+          retry_curl "$PUBLIC_SHOWDOWN_URL" "Public Showdown"
+
+          trap - ERR
+          echo "DEPLOYED_SHA=$deployed"
+          REMOTE
+
+      - name: Deployment summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Randomon production deployment"
+            echo
+            echo "| Item | Result |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${DEPLOY_SHA}\` |"
+            echo "| Environment | production |"
+            echo "| Build, service, and health checks | ${{ job.status }} |"
+            echo "| Target | ${PUBLIC_HEALTH_URL} |"
+          } >> "$GITHUB_STEP_SUMMARY"
