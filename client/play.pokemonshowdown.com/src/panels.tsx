@@ -323,8 +323,11 @@ export function PSPanelWrapper(props: {
 	const style = PSView.posStyle(room) as any;
 	if (props.noScroll === 'hidden') style.overflow = 'hidden';
 	const tinyLayout = room.width < 620 ? ' tiny-layout' : '';
+	const randomonHome = room.id === '' ? ' randomon-home-room' : '';
+	const roomClass = `ps-room${room.id === '' ? '' : ' ps-room-light'}` +
+		`${!props.noScroll ? ' scrollable' : ''}${tinyLayout}${randomonHome}`;
 	return <div
-		class={`ps-room${room.id === '' ? '' : ' ps-room-light'}${!props.noScroll ? ' scrollable' : ''}${tinyLayout}`}
+		class={roomClass}
 		id={`room-${room.id}`} role="tabpanel" aria-labelledby={`roomtab-${room.id}`}
 		style={style} onClick={props.focusClick ? PSView.focusIfNoSelection : undefined} onDragEnter={props.onDragEnter}
 	>
@@ -1153,16 +1156,18 @@ export class PSView extends preact.Component {
 		</div>;
 	}
 	render() {
+		const hideHeader = PS.panel === PS.mainmenu;
 		let rooms = [] as preact.VNode[];
 		for (const roomid in PS.rooms) {
 			const room = PS.rooms[roomid]!;
+			if (hideHeader && room !== PS.mainmenu) continue;
 			if (PS.isPanel(room)) {
 				rooms.push(<PSPanelErrorBoundary key={room.id} room={room} />);
 			}
 		}
 		return <div class="ps-frame" role="none">
-			<PSHeader />
-			<PSMiniHeader />
+			{!hideHeader && <PSHeader />}
+			{!hideHeader && <PSMiniHeader />}
 			{rooms}
 			{PS.popups.map(roomid => this.renderPopup(PS.rooms[roomid]!))}
 		</div>;

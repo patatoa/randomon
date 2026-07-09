@@ -19,6 +19,8 @@ import { Dex, toID, type ID } from "./battle-dex";
 import type { Args } from "./battle-text-parser";
 import { BattleLog } from "./battle-log"; // optional
 
+const RANDOMON_FORMAT_ID = 'gen9randomon';
+
 export type RoomInfo = {
 	title: string, id?: RoomID, desc?: string, userCount?: number, section?: string, privacy?: 'hidden',
 	spotlight?: string, subRooms?: string[],
@@ -50,6 +52,9 @@ export class MainMenuRoom extends PSRoom {
 	search: { searching: string[], games: Record<RoomID, string> | null } = { searching: [], games: null };
 	disallowSpectators: boolean | null = PS.prefs.disallowspectators;
 	lastChallenged: number | null = null;
+	randomonPendingUserid: ID | null = null;
+	randomonError = '';
+	randomonNameTimer: ReturnType<typeof setTimeout> | null = null;
 	constructor(options: RoomOptions) {
 		super(options);
 		if (this.backlog) {
@@ -120,6 +125,80 @@ export class MainMenuRoom extends PSRoom {
 		PS.send(`/utm ${search.packedTeam}`);
 		PS.send(`${privacy}/search ${search.format}`);
 	};
+	startRandomonBattle = (name: string, parentElem?: HTMLElement | null) => {
+		if (this.randomonPendingUserid || this.searchingFormat()) return;
+		name = PS.user.validateName(name);
+		const userid = toID(name);
+		if (!userid || /^guest\d+$/.test(userid)) {
+			this.randomonError = "Enter a name before starting a battle.";
+			this.update(null);
+			return;
+		}
+		if (PS.isOffline) {
+			this.randomonError = "You are disconnected. Reconnect and try again.";
+			this.update(null);
+			return;
+		}
+		if (!PS.user.userid) {
+			this.randomonError = "Still connecting. Try again in a moment.";
+			this.update(null);
+			return;
+		}
+		this.randomonError = '';
+		if (PS.user.named && PS.user.userid === userid) {
+			this.startSearch(RANDOMON_FORMAT_ID, undefined, parentElem);
+			return;
+		}
+		this.randomonPendingUserid = userid;
+		if (this.randomonNameTimer) clearTimeout(this.randomonNameTimer);
+		this.randomonNameTimer = setTimeout(() => {
+			if (!this.randomonPendingUserid) return;
+			this.failRandomonBattleStart("We couldn't confirm that name. Check your connection and try again.");
+		}, 15000);
+		PS.user.changeName(name);
+		this.update(null);
+	};
+	continueRandomonBattleStart = () => {
+		if (!this.randomonPendingUserid || !PS.user.named) return;
+		if (PS.user.userid !== this.randomonPendingUserid) {
+			this.failRandomonBattleStart("That name could not be used. Try a different name.");
+			return;
+		}
+		this.randomonPendingUserid = null;
+		if (this.randomonNameTimer) {
+			clearTimeout(this.randomonNameTimer);
+			this.randomonNameTimer = null;
+		}
+		this.startSearch(RANDOMON_FORMAT_ID);
+	};
+	cancelRandomonBattleStart = () => {
+		this.randomonError = '';
+		if (this.randomonPendingUserid) {
+			this.randomonPendingUserid = null;
+			if (this.randomonNameTimer) {
+				clearTimeout(this.randomonNameTimer);
+				this.randomonNameTimer = null;
+			}
+			this.update(null);
+			return;
+		}
+		this.cancelSearch();
+	};
+	failRandomonBattleStart(message: string) {
+		this.randomonPendingUserid = null;
+		if (this.randomonNameTimer) {
+			clearTimeout(this.randomonNameTimer);
+			this.randomonNameTimer = null;
+		}
+		if (this.searchCountdown) {
+			clearTimeout(this.searchCountdown.timer);
+			this.searchCountdown = null;
+		}
+		this.teamSent = null;
+		this.search.searching = this.search.searching.filter(format => format !== RANDOMON_FORMAT_ID);
+		this.randomonError = message;
+		this.update(null);
+	}
 	override receiveLine(args: Args) {
 		const [cmd] = args;
 		switch (cmd) {
@@ -160,6 +239,7 @@ export class MainMenuRoom extends PSRoom {
 			}
 			PS.user.setName(fullName, named, avatar);
 			PS.teams.loadRemoteTeams();
+			this.continueRandomonBattleStart();
 			return;
 		} case 'updatechallenges': {
 			const [, challengesBuf] = args;
@@ -188,6 +268,7 @@ export class MainMenuRoom extends PSRoom {
 			return;
 		} case 'popup': {
 			let [, message] = args;
+			const inlineRandomonPopup = !!this.randomonPendingUserid || !!this.searchingFormat();
 			for (const roomid in PS.rooms) {
 				const room = PS.rooms[roomid] as ChatRoom | MainMenuRoom;
 				if (room.teamSent) {
@@ -195,6 +276,10 @@ export class MainMenuRoom extends PSRoom {
 					room.update(null);
 				}
 				if (room.type === 'team') (room as any).cancelUpload();
+			}
+			if (inlineRandomonPopup) {
+				this.failRandomonBattleStart(message.replace(/\|\|/g, '\n'));
+				return;
 			}
 			let width: number | undefined;
 			if (message.startsWith('|wide|')) {
@@ -541,12 +626,28 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 	static readonly routes = [''];
 	static readonly Model = MainMenuRoom;
 	static readonly icon = <i class="fa fa-home" aria-hidden></i>;
+	randomonName = '';
+	randomonNameEdited = false;
 	override componentDidMount() {
 		super.componentDidMount();
 		this.subscribeTo(PSBackground);
+		this.subscribeTo(PS.user, loginState => {
+			if (loginState?.error && this.props.room.randomonPendingUserid) {
+				this.props.room.failRandomonBattleStart(loginState.error);
+			} else if (this.props.room.randomonPendingUserid && PS.user.named) {
+				this.props.room.continueRandomonBattleStart();
+			}
+			this.forceUpdate();
+		});
+		setTimeout(() => this.focus());
 	}
 	override focus() {
-		this.base?.querySelector<HTMLButtonElement>('.formatselect')?.focus();
+		const nameInput = this.base?.querySelector<HTMLInputElement>('#randomon-name');
+		if (nameInput && !toID(nameInput.value)) {
+			nameInput.focus();
+			return;
+		}
+		this.base?.querySelector<HTMLButtonElement>('.randomon-battle-button')?.focus();
 	}
 	submitSearch = (ev: Event, format: string, team?: Team) => {
 		ev.preventDefault();
@@ -558,15 +659,26 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 		}
 		PS.mainmenu.startSearch(format, team, ev.target as HTMLElement);
 	};
+	getRandomonName() {
+		if (this.randomonNameEdited) return this.randomonName;
+		return this.randomonName || (PS.user.named ? PS.user.name : '');
+	}
+	changeRandomonName = (ev: Event) => {
+		this.randomonNameEdited = true;
+		this.randomonName = (ev.currentTarget as HTMLInputElement).value;
+		if (this.props.room.randomonError) {
+			this.props.room.randomonError = '';
+			this.props.room.update(null);
+		}
+		this.forceUpdate();
+	};
 	submitRandomonSearch = (ev: Event) => {
 		ev.preventDefault();
-		if (!PS.user.named) {
-			PS.join('login' as RoomID, {
-				parentElem: this.base!.querySelector<HTMLElement>('.big.button'),
-			});
-			return;
-		}
-		PS.mainmenu.startSearch('gen9randomon', undefined, ev.currentTarget as HTMLElement);
+		PS.mainmenu.startRandomonBattle(this.getRandomonName(), ev.currentTarget as HTMLElement);
+	};
+	cancelRandomonSearch = (ev: Event) => {
+		ev.preventDefault();
+		PS.mainmenu.cancelRandomonBattleStart();
 	};
 	handleDragStart = (e: DragEvent) => {
 		const room = PS.getRoom(e.currentTarget);
@@ -719,56 +831,103 @@ class MainMenuPanel extends PSRoomPanel<MainMenuRoom> {
 			</small>
 		);
 	}
+	renderRandomonStatus() {
+		const room = PS.mainmenu;
+		if (room.randomonError) {
+			return <p class="randomon-status randomon-status-error" role="alert">
+				{room.randomonError}
+			</p>;
+		}
+		if (room.randomonPendingUserid) {
+			return <p class="randomon-status" aria-live="polite">
+				<span class="randomon-status-dot" aria-hidden></span> Setting your name...
+			</p>;
+		}
+		if (room.searchCountdown || room.searchingFormat()) {
+			return <p class="randomon-status" aria-live="polite">
+				<span class="randomon-status-dot" aria-hidden></span> Finding a random opponent...
+			</p>;
+		}
+		if (PS.isOffline) {
+			return <>
+				<p class="randomon-status randomon-status-error" role="alert">Disconnected.</p>
+				<p class="randomon-status-action">
+					<button class="button" data-cmd="/reconnect" type="button">
+						<i class="fa fa-plug" aria-hidden></i> Reconnect
+					</button> {}
+					<ReconnectTimer />
+				</p>
+			</>;
+		}
+		if (!PS.user.userid) {
+			return <p class="randomon-status" aria-live="polite">Connecting...</p>;
+		}
+		return <p class="randomon-status" aria-live="polite">Ready for a Randomon battle.</p>;
+	}
+	renderRandomonStart() {
+		const room = PS.mainmenu;
+		const isPending = !!room.randomonPendingUserid || !!room.searchCountdown || !!room.searchingFormat();
+		const isDisabled = isPending || PS.isOffline || !PS.user.userid;
+		const buttonText = isPending ? 'Searching...' : 'Battle!';
+		const name = this.getRandomonName();
+		return <div class="randomon-start">
+			<header class="randomon-start-header">
+				<a class="randomon-brand" href="/" aria-label="Randomon home">
+					<span class="randomon-brand-sprite" aria-hidden></span>
+					<span>
+						<strong>Randomon</strong>
+						<small>Random battles. Real fun.</small>
+					</span>
+				</a>
+				<nav class="randomon-start-actions" aria-label="Randomon actions">
+					<a class="randomon-action" href={`/ladder-${RANDOMON_FORMAT_ID}`}>
+						<i class="fa fa-trophy" aria-hidden></i>
+						<span>Leaderboard</span>
+					</a>
+					<button class="randomon-icon-action" data-href="volume" type="button" title="Sound" aria-label="Sound">
+						<i class={PS.prefs.mute ? 'fa fa-volume-off' : 'fa fa-volume-up'} aria-hidden></i>
+					</button>
+					<button class="randomon-icon-action" data-href="options" type="button" title="Settings" aria-label="Settings">
+						<i class="fa fa-cog" aria-hidden></i>
+					</button>
+				</nav>
+			</header>
+			<main class="randomon-start-main">
+				<form class="randomon-start-card" onSubmit={this.submitRandomonSearch}>
+					<h1>Randomon</h1>
+					<p class="randomon-subtitle">Jump into a random battle!</p>
+					<label class="randomon-name-label" for="randomon-name">Your name</label>
+					<input
+						id="randomon-name" class="randomon-name-input" name="username"
+						value={name} placeholder="Enter your name" autocomplete="nickname"
+						disabled={isPending} onInput={this.changeRandomonName}
+					/>
+					<button class="randomon-battle-button" type="submit" disabled={isDisabled}>
+						<i class={isPending ? 'fa fa-refresh fa-spin' : 'fa fa-crosshairs'} aria-hidden></i>
+						<span>{buttonText}</span>
+					</button>
+					<div class="randomon-status-wrap" aria-live="polite">
+						{this.renderRandomonStatus()}
+					</div>
+					{isPending && <p class="randomon-cancel">
+						<button class="button" type="button" onClick={this.cancelRandomonSearch}>Cancel</button>
+					</p>}
+					<div class="randomon-divider"><span>or</span></div>
+					<a class="randomon-leaderboard-link" href={`/ladder-${RANDOMON_FORMAT_ID}`}>
+						<i class="fa fa-trophy" aria-hidden></i> View Leaderboard
+					</a>
+				</form>
+			</main>
+			<footer class="randomon-disclaimer">
+				<p>Randomon is a fan-made project.</p>
+				<p>Not affiliated with The Pok&eacute;mon Company.</p>
+			</footer>
+		</div>;
+	}
 	override render() {
-		const onlineButton = ' button' + (PS.isOffline ? ' disabled' : '');
-		const tinyLayout = this.props.room.width < 620 ? ' tiny-layout' : '';
 		return <PSPanelWrapper room={this.props.room} onDragEnter={this.handleDragEnter}>
-			<div class={`mainmenu-mini-windows${tinyLayout}`}>
-				{!PS.leftPanelWidth && Config.includes?.mainmenuHTML && (
-					<div dangerouslySetInnerHTML={{ __html: Config.includes.mainmenuHTML }} />
-				)}
-				{this.renderMiniRooms()}
-			</div>
-			<div class={`mainmenu${tinyLayout}`}>
-				<div class="mainmenu-left">
-					{this.renderGames()}
-
-					{this.renderSearchButton()}
-
-					<div class="menugroup">
-						<p><a class="mainmenu2 mainmenu button" href="teambuilder">Teambuilder</a></p>
-						<p><a class={"mainmenu3 mainmenu" + onlineButton} href="ladder">Ladder</a></p>
-						<p><a class={"mainmenu4 mainmenu" + onlineButton} href="view-tournaments-all">Tournaments</a></p>
-					</div>
-
-					<div class="menugroup">
-						<p><a class={"mainmenu4 mainmenu" + onlineButton} href="battles">Watch a battle</a></p>
-						<p><a class={"mainmenu5 mainmenu" + onlineButton} href="users">Find a user</a></p>
-						<p><a class={"mainmenu6 mainmenu" + onlineButton} href="view-friends-all">Friends</a></p>
-						<p><a class={"mainmenu7 mainmenu" + onlineButton} href="resources">Info & Resources</a></p>
-					</div>
-				</div>
-				<div class="mainmenu-right" style={{ display: PS.leftPanelWidth ? 'none' : 'block' }}>
-					<div class="menugroup">
-						<p><a class={"mainmenu1 mainmenu" + onlineButton} href="rooms">Chat rooms</a></p>
-						{PS.server.id !== 'showdown' && (
-							<p><a class={"mainmenu2 mainmenu" + onlineButton} href="lobby">Lobby chat</a></p>
-						)}
-					</div>
-				</div>
-				<div class="mainmenu-footer">
-					<div class="bgcredit">{this.renderBackgroundCredit()}</div>
-					<small>
-						<a href={`//${Config.routes.dex}/`} target="_blank">Pok&eacute;dex</a> | {}
-						<a href={`//${Config.routes.replays}/`} target="_blank">Replays</a> | {}
-						<a href="//smogon.com/forums/" target="_blank">Forum</a> | {}
-						<a href={`//${Config.routes.root}/rules`} target="_blank">Rules</a> | {}
-						<a href={`//${Config.routes.root}/credits`} target="_blank">Credits</a> | {}
-						<a href={`//${Config.routes.root}/privacy`} target="_blank">Privacy</a>
-					</small>
-					<CCPAIntercept />
-				</div>
-			</div>
+			{this.renderRandomonStart()}
+			<CCPAIntercept />
 		</PSPanelWrapper>;
 	}
 }
