@@ -256,7 +256,7 @@ export const pages: Chat.PageTable = {
 			if (!gitData.bans) throw new Chat.ErrorMessage("There are no gitbans at this time.");
 			let buf = `<div class="pad"><h2>Current Gitbans:</h2><hr /><ol>`;
 			for (const [username, reason] of Object.entries(gitData.bans)) {
-				buf += `<li><strong>${username}</strong> - ${reason.trim() || '(No reason found)'}</li>`;
+				buf += Utils.html`<li><strong>${username}</strong> - ${reason.trim() || '(No reason found)'}</li>`;
 			}
 			buf += `</ol>`;
 			return buf;
@@ -265,7 +265,7 @@ export const pages: Chat.PageTable = {
 			if (!gitData.usernames) throw new Chat.ErrorMessage("There are no GitHub usernames in the list.");
 			let buf = `<div class="pad"><h2>Current GitHub username mappings:</h2><hr /><ol>`;
 			for (const [username, name] of Object.entries(gitData.usernames)) {
-				buf += `<li><strong>${username}</strong> - ${name}</li>`;
+				buf += Utils.html`<li><strong>${username}</strong> - ${name}</li>`;
 			}
 			buf += `</ol>`;
 			return buf;

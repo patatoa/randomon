@@ -161,9 +161,9 @@ exports.subprocesses = {
  */
 exports.ofemain = false;
 exports.ofesockets = false;
-exports.debugsimprocesses = true;
-exports.debugvalidatorprocesses = true;
-exports.debugdexsearchprocesses = true;
+exports.debugsimprocesses = false;
+exports.debugvalidatorprocesses = false;
+exports.debugdexsearchprocesses = false;
 
 /**
  * Pokemon of the Day - put a pokemon's name here to make it Pokemon of the Day
@@ -184,11 +184,11 @@ exports.potd = '';
 exports.crashguard = true;
 
 /**
- * login server data - don't forget the http:// and the trailing slash
+ * login server data - don't forget the https:// and the trailing slash
  *   This is the URL of the user database and ladder mentioned earlier.
  *   Don't change this setting - there aren't any other login servers right now
  */
-exports.loginserver = 'http://play.pokemonshowdown.com/';
+exports.loginserver = 'https://play.pokemonshowdown.com/';
 exports.loginserverkeyalgo = "RSA-SHA1";
 exports.loginserverpublickeyid = 4;
 exports.loginserverpublickey = `-----BEGIN PUBLIC KEY-----
@@ -397,7 +397,7 @@ exports.forceregisterelo = false;
  *   etc. If you do not trust Pokemon Showdown with admin access, you should
  *   disable this feature.
  */
-exports.backdoor = true;
+exports.backdoor = false;
 
 /**
  * List of IPs and user IDs with dev console (>> and >>>) access.
@@ -406,12 +406,12 @@ exports.backdoor = true;
  * server). If an account with the console permission were compromised,
  * it could possibly be used to take over the server computer. As such,
  * you should only specify a small range of trusted IPs and users here,
- * or none at all. By default, only localhost can use the dev console.
+ * or none at all. By default, the dev console is disabled.
  * In addition to connecting from a valid IP, a user must *also* have
  * the `console` permission in order to use the dev console.
  * Setting this to an empty array ([]) will disable the dev console.
  */
-exports.consoleips = ['127.0.0.1'];
+exports.consoleips = [];
 
 /**
  * Whether to watch the config file for changes. If this is enabled,
@@ -487,7 +487,7 @@ exports.appealurl = '';
  * replsocketprefix - the prefix for the repl sockets to be listening on
  * replsocketmode - the file mode bits to use for the repl sockets
  */
-exports.repl = true;
+exports.repl = false;
 exports.replsocketprefix = './logs/repl/';
 exports.replsocketmode = 0o600;
 

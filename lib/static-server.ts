@@ -121,6 +121,8 @@ export class StaticServer {
 		if (this.options.serverInfo !== null) {
 			this.defaultHeaders['server'] = this.options.serverInfo || SERVER_INFO;
 		}
+		this.defaultHeaders['x-content-type-options'] = 'nosniff';
+		this.defaultHeaders['referrer-policy'] = 'strict-origin-when-cross-origin';
 
 		for (const k in this.options.headers) {
 			this.defaultHeaders[k] = this.options.headers[k];
@@ -192,7 +194,8 @@ export class StaticServer {
 
 		// Make sure we're not trying to access a
 		// file outside of the root.
-		if (!pathname.startsWith(this.root)) {
+		const relativePath = path.relative(this.root, pathname);
+		if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
 			// Forbidden
 			return this.getResult(403);
 		}
