@@ -378,14 +378,15 @@ Production deployment is handled by the `Deploy Randomon Production` GitHub
 Actions workflow in `.github/workflows/deploy-production.yml`.
 
 The workflow runs automatically after a push to `master` and can also be run
-manually with **Actions → Deploy Randomon Production → Run workflow**. It deploys
-the exact commit for the workflow run, prevents overlapping production deploys,
-builds the server and client on the VM, restarts `randomon`, and checks local and
-public health endpoints.
+manually with **Actions → Deploy Randomon Production → Run workflow**. It builds
+the exact workflow commit on GitHub Actions, packages a release artifact, uploads
+that artifact to the VM, switches `/opt/randomon/current` to the new release,
+restarts `randomon`, and checks local, public, and real Showdown WebSocket
+startup health.
 
-The workflow intentionally fails if `/opt/randomon` is not already a clean Git
-checkout of `https://github.com/patatoa/randomon.git`. It does not delete,
-replace, or convert the production directory.
+The production VM is no longer expected to be a Git checkout. Git belongs to the
+GitHub runner; the VM is a runtime host with shared config, logs, databases, and
+large downloaded assets kept outside release directories.
 
 ### Required GitHub secrets
 
@@ -407,65 +408,100 @@ ssh-keyscan -H randomon.patatoa.com
 
 Verify the fingerprint out of band before saving it as a secret.
 
-### One-time checkout conversion
+### One-time artifact-release setup
 
-Current production note: `/opt/randomon` may be an older file-copy deployment
-directory instead of a Git checkout. Convert it manually and carefully before
-expecting the GitHub workflow to succeed.
+The workflow intentionally fails until `/opt/randomon` is prepared as a release
+root. Do this manually and carefully. Do not let GitHub Actions restructure a
+live production directory.
 
 Do this from an admin shell on the VM:
 
 ```bash
-# Stop the service only when you are ready for the final switch.
+# Stop the service only when ready for the final switch.
 sudo systemctl stop randomon
 
 # Preserve the current production directory.
-sudo mv /opt/randomon /opt/randomon.pre-git.$(date +%Y%m%d%H%M%S)
+sudo mv /opt/randomon /opt/randomon.pre-artifact.$(date +%Y%m%d%H%M%S)
 
-# Clone a fresh checkout owned by the service user.
-sudo -u randomon git clone https://github.com/patatoa/randomon.git /opt/randomon
-cd /opt/randomon
-sudo -u randomon git checkout master
+# Create the release-root layout.
+sudo mkdir -p /opt/randomon/releases /opt/randomon/shared/config \
+  /opt/randomon/shared/client-config /opt/randomon/shared/logs \
+  /opt/randomon/shared/databases /opt/randomon/shared/client-assets
+sudo chown -R randomon:randomon /opt/randomon
 
-# Restore live-only files and runtime data from the preserved directory.
-OLD=/opt/randomon.pre-git.<timestamp>
-sudo -u randomon mkdir -p /opt/randomon/config /opt/randomon/client/config /opt/randomon/logs
-sudo -u randomon cp "$OLD/config/config.js" /opt/randomon/config/config.js
-sudo -u randomon cp "$OLD/client/config/config.js" /opt/randomon/client/config/config.js
-sudo -u randomon cp -a "$OLD/logs/." /opt/randomon/logs/
+# Keep the timestamped backup path handy.
+OLD=/opt/randomon.pre-artifact.<timestamp>
 
-# Preserve downloaded assets when they already exist locally.
+# Restore live-only server and client config.
+sudo -u randomon cp "$OLD/config/config.js" /opt/randomon/shared/config/config.js
+sudo -u randomon cp "$OLD/client/config/config.js" /opt/randomon/shared/client-config/config.js
+
+# colors.json is referenced through the client config path. Use the old file if
+# it exists; otherwise an empty object is acceptable.
+if [ -f "$OLD/client/config/colors.json" ]; then
+  sudo -u randomon cp "$OLD/client/config/colors.json" /opt/randomon/shared/client-config/colors.json
+else
+  printf '{}\n' | sudo -u randomon tee /opt/randomon/shared/client-config/colors.json >/dev/null
+fi
+
+# Preserve runtime logs and databases.
+sudo -u randomon cp -a "$OLD/logs/." /opt/randomon/shared/logs/ 2>/dev/null || true
+sudo -u randomon cp -a "$OLD/databases/." /opt/randomon/shared/databases/ 2>/dev/null || true
+
+# Preserve large downloaded client assets that are not committed.
+sudo -u randomon mkdir -p /opt/randomon/shared/client-assets
 sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/sprites" \
-  /opt/randomon/client/play.pokemonshowdown.com/ 2>/dev/null || true
-sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/fx" \
-  /opt/randomon/client/play.pokemonshowdown.com/ 2>/dev/null || true
-sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/data" \
-  /opt/randomon/client/play.pokemonshowdown.com/ 2>/dev/null || true
+  /opt/randomon/shared/client-assets/ 2>/dev/null || true
+sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/audio" \
+  /opt/randomon/shared/client-assets/ 2>/dev/null || true
 
-# Rebuild and verify before restarting.
-sudo -u randomon npm ci
-sudo -u randomon node build
-sudo -u randomon bash -lc '
-  cd /opt/randomon/client &&
-  npm ci &&
-  PS_ROUTES=config/routes.production.json node build-tools/update full &&
-  cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
-'
+# Seed the first release from the preserved working app so rollback is possible
+# before the first artifact workflow succeeds.
+sudo -u randomon mkdir -p /opt/randomon/releases/bootstrap
+sudo -u randomon cp -a "$OLD/." /opt/randomon/releases/bootstrap/
+sudo -u randomon rm -rf /opt/randomon/releases/bootstrap/.git
+sudo -u randomon rm -rf /opt/randomon/releases/bootstrap/logs /opt/randomon/releases/bootstrap/databases
+sudo -u randomon ln -s /opt/randomon/shared/logs /opt/randomon/releases/bootstrap/logs
+sudo -u randomon ln -s /opt/randomon/shared/databases /opt/randomon/releases/bootstrap/databases
+sudo -u randomon ln -sfn /opt/randomon/shared/config/config.js /opt/randomon/releases/bootstrap/config/config.js
+sudo -u randomon ln -sfn /opt/randomon/shared/client-config/config.js /opt/randomon/releases/bootstrap/client/config/config.js
+sudo -u randomon ln -sfn /opt/randomon/shared/client-config/colors.json /opt/randomon/releases/bootstrap/client/config/colors.json
+sudo -u randomon ln -sfn /opt/randomon/releases/bootstrap /opt/randomon/current
 
+# Update systemd so the service runs from the current release symlink.
+sudo systemctl edit randomon
+```
+
+Use this override:
+
+```ini
+[Service]
+WorkingDirectory=/opt/randomon/current
+ExecStart=
+ExecStart=/usr/bin/node pokemon-showdown --skip-build 8000
+ExecStartPre=
+ExecStartPre=/usr/bin/mkdir -p /opt/randomon/shared/logs /opt/randomon/shared/logs/repl
+ExecStartPre=/usr/bin/touch /opt/randomon/shared/logs/chatlog-access.txt /opt/randomon/shared/logs/responder.jsonl /opt/randomon/shared/logs/errors.txt
+```
+
+Then verify:
+
+```bash
+sudo systemctl daemon-reload
 sudo systemctl start randomon
 sudo systemctl is-active randomon
 curl -fsS http://127.0.0.1:8000/showdown/info
 curl -fsSI https://randomon.patatoa.com
 ```
 
-Only remove the preserved `/opt/randomon.pre-git.*` directory after a successful
-workflow deployment and smoke test.
+Only remove the preserved `/opt/randomon.pre-artifact.*` directory after a
+successful workflow deployment and smoke test.
 
 ### Live-only config check
 
-The production server config is `/opt/randomon/config/config.js` and is
-gitignored. Confirm these values after the checkout conversion and after deploys
-that touch matchmaking:
+The production server config is `/opt/randomon/shared/config/config.js` and is
+linked into every release as `config/config.js`. Confirm these values after the
+artifact setup and after deploys that touch matchmaking:
 
 ```js
 exports.proxyip = ['127.0.0.1'];
@@ -480,9 +516,9 @@ IP, including two local browser tabs, to match each other.
 ### Deployment SSH user and sudo
 
 Recommended setup: install the deployment SSH key for the `randomon` service
-user and set `RANDOMON_DEPLOY_USER=randomon`. Git operations and builds then run
-directly as `randomon`, and sudo is needed only for service restart and
-diagnostics.
+user and set `RANDOMON_DEPLOY_USER=randomon`. The workflow uploads the release
+artifact to `/tmp`, extracts it into `/opt/randomon/releases`, switches
+`/opt/randomon/current`, and needs sudo only for service restart and diagnostics.
 
 ```sudoers
 Cmnd_Alias RANDOMON_SYSTEMD = /bin/systemctl restart randomon, \
@@ -498,64 +534,79 @@ Adjust `/bin/systemctl` and `/bin/journalctl` paths if `command -v systemctl` or
 `NOPASSWD: ALL`.
 
 If you choose a separate deployment user instead of `randomon`, it must also be
-allowed to run the repository Git, npm, Node, test, copy, and client build
-commands as `randomon`. Keep that policy scoped to `/opt/randomon`; do not grant
-unrestricted root sudo.
+allowed to write `/opt/randomon/current` and run release-directory file
+operations as `randomon`. Keep that policy scoped to `/opt/randomon`; do not
+grant unrestricted root sudo.
 
 ### What each workflow deployment does
 
 For every automatic or manual deployment, the workflow:
 
 1. Validates required GitHub secrets before SSH.
-2. Connects with strict SSH host-key checking.
-3. Verifies `/opt/randomon/.git` exists.
-4. Verifies the Git origin is `https://github.com/patatoa/randomon.git`.
-5. Fails if tracked production files are dirty, except for the generated
-   `client/play.pokemonshowdown.com/index.html` promotion from the previous
-   production build.
-6. Fetches and checks out the exact workflow SHA.
-7. Runs `npm ci` and `node build` from `/opt/randomon`.
-8. Runs `npm ci` from `/opt/randomon/client`.
-9. Runs `PS_ROUTES=config/routes.production.json node build-tools/update full`.
-10. Copies `play.pokemonshowdown.com/caches/index-new.html` to
-    `play.pokemonshowdown.com/index.html`.
-11. Restarts `randomon`.
-12. Verifies `systemctl is-active randomon`.
-13. Checks `http://127.0.0.1:8000/showdown/info`.
-14. Checks `https://randomon.patatoa.com`.
-15. Checks `https://randomon.patatoa.com/showdown/info`.
+2. Checks out the exact workflow commit on GitHub Actions.
+3. Runs `npm ci` and `npm run build` on GitHub Actions.
+4. Runs `npm --prefix client ci`.
+5. Runs `PS_ROUTES=config/routes.production.json node build-tools/update full`.
+6. Copies `play.pokemonshowdown.com/caches/index-new.html` to
+   `play.pokemonshowdown.com/index.html`.
+7. Packages the built repository, including `node_modules`, into a tarball.
+8. Uploads the tarball to `/tmp` on the VM.
+9. Extracts it into `/opt/randomon/releases/<sha>`.
+10. Links shared runtime files into the release:
+    - `/opt/randomon/shared/config/config.js`
+    - `/opt/randomon/shared/client-config/config.js`
+    - `/opt/randomon/shared/client-config/colors.json`
+    - `/opt/randomon/shared/logs`
+    - `/opt/randomon/shared/databases`
+    - optional shared sprites and audio directories.
+11. Atomically switches `/opt/randomon/current` to the new release.
+12. Restarts `randomon`.
+13. Verifies `systemctl is-active randomon`.
+14. Checks `http://127.0.0.1:8000/showdown/info`.
+15. Checks `https://randomon.patatoa.com`.
+16. Checks `https://randomon.patatoa.com/showdown/info`.
+17. Opens local and public Showdown WebSockets and requires both
+    `|updateuser|` and `|challstr|` startup frames.
 
-The workflow never runs `git clean`, so gitignored production configuration,
-logs, downloaded sprites, effects, and other runtime files are preserved. The
-only tracked file the workflow may reset before checkout is
-`client/play.pokemonshowdown.com/index.html`, because production deploys
-regenerate it from `caches/index-new.html`.
+The workflow does not run Git commands on the VM and does not build on the VM.
+If post-switch health verification fails, it points `/opt/randomon/current`
+back to the previous release and restarts `randomon`.
 
 ### Failure recovery
 
-The workflow exits nonzero on checkout, dependency, build, restart, or health
+The workflow exits nonzero on build, upload, extraction, restart, or health
 failure. Failed restart and health-check stages print `systemctl status randomon`
-and recent `journalctl -u randomon` output in the workflow logs.
+and recent `journalctl -u randomon` output in the workflow logs. If failure
+occurs after switching releases, the workflow attempts to restore the previous
+release symlink and restart the service.
 
 Common fixes:
 
-- Non-Git `/opt/randomon`: complete the one-time checkout conversion above.
-- Unexpected Git origin: correct the remote with
-  `sudo -u randomon git -C /opt/randomon remote set-url origin https://github.com/patatoa/randomon.git`.
-- Dirty tracked files: inspect
-  `sudo -u randomon git -C /opt/randomon status --short --untracked-files=no`
-  and either commit, revert, or manually preserve the change before retrying.
+- Missing `/opt/randomon/current`: complete the one-time artifact-release setup
+  above.
+- Missing shared config: restore
+  `/opt/randomon/shared/config/config.js` or
+  `/opt/randomon/shared/client-config/config.js` from the preserved production
+  backup.
+- Failed artifact extraction: confirm `/opt/randomon/releases` is writable by
+  `randomon` and the VM has enough disk space.
 - Missing `index-new.html`: rerun the client build command locally on the VM and
-  inspect its failure output.
+  inspect its failure output, or inspect the GitHub Actions client-build logs.
 - Failed health checks: inspect `journalctl -u randomon -n 100 --no-pager` and
   nginx logs, then rerun the same workflow after fixing the issue.
 
 ### Manual rollback
 
-Automatic rollback is intentionally out of scope. To roll back, dispatch the
-deployment workflow for a previously known-good commit from `master`, or SSH to
-the VM and check out that SHA manually, then run the same build, index promotion,
-restart, and health checks listed above.
+The workflow automatically restores the previous release when post-switch health
+checks fail. For a manual rollback:
+
+```bash
+ls -1dt /opt/randomon/releases/*
+sudo -u randomon ln -sfn /opt/randomon/releases/<known-good-sha> /opt/randomon/current.rollback
+sudo -u randomon mv -Tf /opt/randomon/current.rollback /opt/randomon/current
+sudo systemctl restart randomon
+curl -fsS http://127.0.0.1:8000/showdown/info
+```
 
 ---
 

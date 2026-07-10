@@ -15,18 +15,18 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy production
+    name: Build artifact and deploy production
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     env:
-      APP_DIR: /opt/randomon
+      APP_ROOT: /opt/randomon
       DEPLOY_SHA: ${{ github.sha }}
-      EXPECTED_REPOSITORY: https://github.com/patatoa/randomon.git
       LOCAL_HEALTH_URL: http://127.0.0.1:8000/showdown/info
       PUBLIC_HEALTH_URL: https://randomon.patatoa.com
       PUBLIC_SHOWDOWN_URL: https://randomon.patatoa.com/showdown/info
+      PUBLIC_WS_URL: wss://randomon.patatoa.com/showdown
       SERVICE_NAME: randomon
 
     steps:
@@ -78,7 +78,138 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Deploy exact commit on production VM
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+
+      - name: Install server dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+
+      - name: Build server
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+
+      - name: Install client dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix client ci
+
+      - name: Build production client
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd client
+          PS_ROUTES=config/routes.production.json node build-tools/update full
+          test -f play.pokemonshowdown.com/caches/index-new.html
+          cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
+
+      - name: Package release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' "$DEPLOY_SHA" > RANDOMON_RELEASE
+          artifact="$RUNNER_TEMP/randomon-${DEPLOY_SHA}.tar.gz"
+
+          tar \
+            --create \
+            --gzip \
+            --file "$artifact" \
+            --exclude='./.git' \
+            --exclude='./.github' \
+            --exclude='./logs' \
+            --exclude='./config/config.js' \
+            --exclude='./client/config/config.js' \
+            --exclude='./client/config/colors.json' \
+            --exclude='./databases/*.db' \
+            --exclude='./databases/*.db-*' \
+            --exclude='./client/play.pokemonshowdown.com/sprites' \
+            --exclude='./client/play.pokemonshowdown.com/audio' \
+            .
+
+          tar -tzf "$artifact" >/dev/null
+          ls -lh "$artifact"
+
+      - name: Preflight production release root
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.RANDOMON_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.RANDOMON_DEPLOY_USER }}
+          DEPLOY_PORT: ${{ steps.secrets.outputs.port }}
+        run: |
+          set -euo pipefail
+
+          ssh -i ~/.ssh/randomon_deploy_key \
+            -p "$DEPLOY_PORT" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "APP_ROOT='$APP_ROOT' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          run_as_app() {
+            if [[ "$(id -un)" == "randomon" ]]; then
+              "$@"
+            else
+              sudo -n -u randomon "$@"
+            fi
+          }
+
+          for dir in "$APP_ROOT" "$APP_ROOT/releases" "$APP_ROOT/shared"; do
+            if [[ ! -d "$dir" ]]; then
+              echo "::error::Missing $dir. Complete the artifact deployment one-time setup in DEPLOY.md."
+              exit 1
+            fi
+          done
+
+          if [[ ! -L "$APP_ROOT/current" ]]; then
+            echo "::error::$APP_ROOT/current must be a symlink to the active release. Complete DEPLOY.md one-time setup."
+            exit 1
+          fi
+
+          for file in "$APP_ROOT/shared/config/config.js" "$APP_ROOT/shared/client-config/config.js"; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Missing shared runtime file $file. Complete DEPLOY.md one-time setup."
+              exit 1
+            fi
+          done
+
+          run_as_app test -w "$APP_ROOT/releases"
+          REMOTE
+
+      - name: Upload release artifact
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.RANDOMON_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.RANDOMON_DEPLOY_USER }}
+          DEPLOY_PORT: ${{ steps.secrets.outputs.port }}
+        run: |
+          set -euo pipefail
+
+          scp -i ~/.ssh/randomon_deploy_key \
+            -P "$DEPLOY_PORT" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/randomon-${DEPLOY_SHA}.tar.gz" \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/randomon-${DEPLOY_SHA}.tar.gz"
+
+      - name: Activate production release
         id: deploy
         shell: bash
         env:
@@ -94,20 +225,26 @@ jobs:
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
             "$DEPLOY_USER@$DEPLOY_HOST" \
-            "APP_DIR='$APP_DIR' DEPLOY_SHA='$DEPLOY_SHA' EXPECTED_REPOSITORY='$EXPECTED_REPOSITORY' LOCAL_HEALTH_URL='$LOCAL_HEALTH_URL' PUBLIC_HEALTH_URL='$PUBLIC_HEALTH_URL' PUBLIC_SHOWDOWN_URL='$PUBLIC_SHOWDOWN_URL' SERVICE_NAME='$SERVICE_NAME' bash -s" <<'REMOTE'
+            "APP_ROOT='$APP_ROOT' DEPLOY_SHA='$DEPLOY_SHA' LOCAL_HEALTH_URL='$LOCAL_HEALTH_URL' PUBLIC_HEALTH_URL='$PUBLIC_HEALTH_URL' PUBLIC_SHOWDOWN_URL='$PUBLIC_SHOWDOWN_URL' PUBLIC_WS_URL='$PUBLIC_WS_URL' SERVICE_NAME='$SERVICE_NAME' bash -s" <<'REMOTE'
           set -Eeuo pipefail
 
           stage="initializing"
+          switched=0
+          previous_release=""
 
           diagnostics() {
             status=$?
             echo "::error::Deployment failed during: ${stage}"
-            if command -v sudo >/dev/null 2>&1; then
-              echo "---- systemctl status ${SERVICE_NAME} ----"
-              sudo -n systemctl status "$SERVICE_NAME" --no-pager || true
-              echo "---- recent journal ${SERVICE_NAME} ----"
-              sudo -n journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+            if [[ "$switched" -eq 1 && -n "$previous_release" && -e "$previous_release" ]]; then
+              echo "Restoring previous release: $previous_release"
+              run_as_app ln -sfn "$previous_release" "$APP_ROOT/current.rollback"
+              run_as_app mv -Tf "$APP_ROOT/current.rollback" "$APP_ROOT/current"
+              sudo -n systemctl restart "$SERVICE_NAME" || true
             fi
+            echo "---- systemctl status ${SERVICE_NAME} ----"
+            sudo -n systemctl status "$SERVICE_NAME" --no-pager || true
+            echo "---- recent journal ${SERVICE_NAME} ----"
+            sudo -n journalctl -u "$SERVICE_NAME" -n 120 --no-pager || true
             exit "$status"
           }
 
@@ -118,14 +255,6 @@ jobs:
               "$@"
             else
               sudo -n -u randomon "$@"
-            fi
-          }
-
-          run_as_app_shell() {
-            if [[ "$(id -un)" == "randomon" ]]; then
-              bash -lc "$1"
-            else
-              sudo -n -u randomon bash -lc "$1"
             fi
           }
 
@@ -147,61 +276,101 @@ jobs:
             return 1
           }
 
-          stage="checkout preflight"
-          if [[ ! -d "$APP_DIR/.git" ]]; then
-            echo "::error::$APP_DIR is not a Git checkout. Follow DEPLOY.md one-time checkout conversion before using this workflow."
+          verify_showdown_startup() {
+            local base_url="$1"
+            local label="$2"
+            node - "$base_url" "$label" <<'NODE'
+          const baseUrl = process.argv[2];
+          const label = process.argv[3];
+          const suffix = `${Math.floor(Math.random() * 1000)}/${Date.now().toString(36)}/websocket`;
+          const url = `${baseUrl}/${suffix}`;
+          let gotUpdateuser = false;
+          let gotChallstr = false;
+          const ws = new WebSocket(url);
+          const timer = setTimeout(() => {
+            console.error(`${label} startup-frame check timed out`, {gotUpdateuser, gotChallstr});
+            try {
+              ws.close();
+            } catch {}
+            process.exit(1);
+          }, 8000);
+          ws.onmessage = event => {
+            const data = String(event.data);
+            if (data.includes('|updateuser|')) gotUpdateuser = true;
+            if (data.includes('|challstr|')) gotChallstr = true;
+            if (gotUpdateuser && gotChallstr) {
+              clearTimeout(timer);
+              ws.close();
+              console.log(`${label} startup-frame check passed`);
+              process.exit(0);
+            }
+          };
+          ws.onerror = event => {
+            clearTimeout(timer);
+            console.error(`${label} startup-frame check failed`, event.message || event.type || event);
+            process.exit(1);
+          };
+          ws.onclose = () => {
+            if (!gotUpdateuser || !gotChallstr) {
+              clearTimeout(timer);
+              console.error(`${label} websocket closed before startup frames`, {gotUpdateuser, gotChallstr});
+              process.exit(1);
+            }
+          };
+          NODE
+          }
+
+          release="$APP_ROOT/releases/$DEPLOY_SHA"
+          staging="$APP_ROOT/releases/.staging-$DEPLOY_SHA-$$"
+          upload="/tmp/randomon-$DEPLOY_SHA.tar.gz"
+
+          stage="release artifact preflight"
+          run_as_app test -f "$upload"
+          previous_release="$(readlink -f "$APP_ROOT/current" || true)"
+
+          stage="extract release"
+          run_as_app rm -rf "$staging"
+          run_as_app mkdir -p "$staging"
+          run_as_app timeout 180 tar -xzf "$upload" -C "$staging"
+          run_as_app test -f "$staging/RANDOMON_RELEASE"
+          extracted_sha="$(run_as_app cat "$staging/RANDOMON_RELEASE")"
+          if [[ "$extracted_sha" != "$DEPLOY_SHA" ]]; then
+            echo "::error::Artifact SHA $extracted_sha does not match deploy SHA $DEPLOY_SHA"
             exit 1
           fi
 
-          cd "$APP_DIR"
-
-          origin="$(run_as_app git -C "$APP_DIR" remote get-url origin)"
-          normalized_origin="${origin%.git}.git"
-          normalized_expected="${EXPECTED_REPOSITORY%.git}.git"
-          if [[ "$normalized_origin" != "$normalized_expected" ]]; then
-            echo "::error::Unexpected Git origin for $APP_DIR. Expected $EXPECTED_REPOSITORY, found $origin."
-            exit 1
+          stage="link shared runtime data"
+          run_as_app mkdir -p "$APP_ROOT/shared/logs" "$APP_ROOT/shared/databases" "$APP_ROOT/shared/client-config"
+          if [[ ! -f "$APP_ROOT/shared/client-config/colors.json" ]]; then
+            printf '{}\n' | run_as_app tee "$APP_ROOT/shared/client-config/colors.json" >/dev/null
+          fi
+          run_as_app mkdir -p "$staging/config" "$staging/client/config" "$staging/client/play.pokemonshowdown.com"
+          run_as_app rm -rf "$staging/logs" "$staging/databases" \
+            "$staging/config/config.js" \
+            "$staging/client/config/config.js" \
+            "$staging/client/config/colors.json" \
+            "$staging/client/play.pokemonshowdown.com/sprites" \
+            "$staging/client/play.pokemonshowdown.com/audio"
+          run_as_app ln -s "$APP_ROOT/shared/logs" "$staging/logs"
+          run_as_app ln -s "$APP_ROOT/shared/databases" "$staging/databases"
+          run_as_app ln -s "$APP_ROOT/shared/config/config.js" "$staging/config/config.js"
+          run_as_app ln -s "$APP_ROOT/shared/client-config/config.js" "$staging/client/config/config.js"
+          run_as_app ln -s "$APP_ROOT/shared/client-config/colors.json" "$staging/client/config/colors.json"
+          if [[ -d "$APP_ROOT/shared/client-assets/sprites" ]]; then
+            run_as_app ln -s "$APP_ROOT/shared/client-assets/sprites" "$staging/client/play.pokemonshowdown.com/sprites"
+          fi
+          if [[ -d "$APP_ROOT/shared/client-assets/audio" ]]; then
+            run_as_app ln -s "$APP_ROOT/shared/client-assets/audio" "$staging/client/play.pokemonshowdown.com/audio"
           fi
 
-          generated_index="client/play.pokemonshowdown.com/index.html"
-          tracked_status="$(run_as_app git -C "$APP_DIR" status --porcelain --untracked-files=no)"
-          if [[ -n "$tracked_status" ]]; then
-            if [[ "$tracked_status" == " M $generated_index" ]]; then
-              echo "Resetting generated production index before checkout: $generated_index"
-              run_as_app git -C "$APP_DIR" checkout -- "$generated_index"
-            else
-              echo "::error::Tracked production files have unexpected changes. Commit, stash, or resolve them before deploying."
-              echo "$tracked_status"
-              exit 1
-            fi
-          fi
+          stage="publish release directory"
+          run_as_app rm -rf "$release"
+          run_as_app mv "$staging" "$release"
 
-          stage="fetch exact commit"
-          run_as_app git -C "$APP_DIR" fetch --prune origin "$DEPLOY_SHA"
-          run_as_app git -C "$APP_DIR" checkout --detach "$DEPLOY_SHA"
-          deployed="$(run_as_app git -C "$APP_DIR" rev-parse HEAD)"
-          if [[ "$deployed" != "$DEPLOY_SHA" ]]; then
-            echo "::error::Remote checkout is $deployed, expected $DEPLOY_SHA."
-            exit 1
-          fi
-
-          stage="server dependency installation"
-          run_as_app npm ci
-
-          stage="server build"
-          run_as_app node build
-
-          stage="client dependency installation"
-          run_as_app_shell "cd '$APP_DIR/client' && npm ci"
-
-          stage="client production build"
-          run_as_app_shell "cd '$APP_DIR/client' && PS_ROUTES=config/routes.production.json node build-tools/update full"
-
-          stage="generated index promotion"
-          run_as_app test -f "$APP_DIR/client/play.pokemonshowdown.com/caches/index-new.html"
-          run_as_app cp \
-            "$APP_DIR/client/play.pokemonshowdown.com/caches/index-new.html" \
-            "$APP_DIR/client/play.pokemonshowdown.com/index.html"
+          stage="activate release"
+          run_as_app ln -sfn "$release" "$APP_ROOT/current.next"
+          run_as_app mv -Tf "$APP_ROOT/current.next" "$APP_ROOT/current"
+          switched=1
 
           stage="service restart"
           sudo -n systemctl restart "$SERVICE_NAME"
@@ -218,8 +387,18 @@ jobs:
           stage="public Showdown verification"
           retry_curl "$PUBLIC_SHOWDOWN_URL" "Public Showdown"
 
+          stage="local startup-frame verification"
+          verify_showdown_startup "ws://127.0.0.1:8000/showdown" "Local Showdown"
+
+          stage="public startup-frame verification"
+          verify_showdown_startup "$PUBLIC_WS_URL" "Public Showdown"
+
+          stage="release cleanup"
+          rm -f "$upload"
+          run_as_app bash -lc "ls -1dt '$APP_ROOT'/releases/* 2>/dev/null | tail -n +6 | xargs -r rm -rf"
+
           trap - ERR
-          echo "DEPLOYED_SHA=$deployed"
+          echo "DEPLOYED_SHA=$DEPLOY_SHA"
           REMOTE
 
       - name: Deployment summary
@@ -234,6 +413,7 @@ jobs:
             echo "| --- | --- |"
             echo "| Commit | \`${DEPLOY_SHA}\` |"
             echo "| Environment | production |"
+            echo "| Deployment model | GitHub-built release artifact |"
             echo "| Build, service, and health checks | ${{ job.status }} |"
             echo "| Target | ${PUBLIC_HEALTH_URL} |"
           } >> "$GITHUB_STEP_SUMMARY"

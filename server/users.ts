@@ -79,12 +79,12 @@ function move(user: User, newUserid: ID) {
 function add(user: User) {
 	if (user.id) throw new Error(`Adding a user that already exists`);
 
-	numUsers++;
-	user.guestNum = numUsers;
-	user.name = `Guest ${numUsers}`;
-	user.id = toID(user.name);
-
-	if (users.has(user.id)) throw new Error(`userid taken: ${user.id}`);
+	do {
+		numUsers++;
+		user.guestNum = numUsers;
+		user.name = `Guest ${numUsers}`;
+		user.id = toID(user.name);
+	} while (users.has(user.id));
 	users.set(user.id, user);
 }
 function deleteUser(user: User) {
