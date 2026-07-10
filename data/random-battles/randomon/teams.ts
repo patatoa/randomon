@@ -23,6 +23,17 @@ export class RandomRandoMonTeams extends RandomTeams {
 	// Pool = keys of this object. Real Pokémon use curated + custom sets;
 	// new Pokémon (not in randbats) use custom sets only.
 	override randomSets: {[species: string]: any} = mergedSets;
+
+	override randomSet(
+		species: string | Species,
+		teamDetails: RandomTeamsTypes.TeamDetails = {},
+		isLead = false,
+		isDoubles = false
+	): RandomTeamsTypes.RandomSet {
+		const set = super.randomSet(species, teamDetails, isLead, isDoubles);
+		set.level = 100;
+		return set;
+	}
 }
 
 export default RandomRandoMonTeams;

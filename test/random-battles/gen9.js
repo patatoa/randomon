@@ -22,3 +22,13 @@ describe('[Gen 9] Monotype Random Battle (slow)', () => {
 		});
 	});
 });
+
+describe('[Gen 9] Rando Mon', () => {
+	it('should generate every Pokemon at level 100', () => {
+		testTeam({ format: 'gen9randomon', rounds: 100 }, team => {
+			for (const set of team) {
+				assert.equal(set.level, 100, `${set.species} should be level 100`);
+			}
+		});
+	});
+});
