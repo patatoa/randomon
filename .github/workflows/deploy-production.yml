@@ -184,6 +184,11 @@ jobs:
             exit 1
           fi
 
+          if [[ -e "$APP_ROOT/client" && ! -L "$APP_ROOT/client" ]]; then
+            echo "::error::$APP_ROOT/client must be a symlink to $APP_ROOT/current/client for nginx static files. Complete DEPLOY.md one-time setup."
+            exit 1
+          fi
+
           for file in "$APP_ROOT/shared/config/config.js" "$APP_ROOT/shared/client-config/config.js"; do
             if [[ ! -f "$file" ]]; then
               echo "::error::Missing shared runtime file $file. Complete DEPLOY.md one-time setup."
@@ -258,6 +263,14 @@ jobs:
             else
               sudo -n -u randomon "$@"
             fi
+          }
+
+          ensure_static_root_symlink() {
+            if [[ -e "$APP_ROOT/client" && ! -L "$APP_ROOT/client" ]]; then
+              echo "::error::$APP_ROOT/client must be a symlink to $APP_ROOT/current/client for nginx static files"
+              exit 1
+            fi
+            run_as_app ln -sfn "$APP_ROOT/current/client" "$APP_ROOT/client"
           }
 
           retry_curl() {
@@ -370,6 +383,7 @@ jobs:
           run_as_app mv "$staging" "$release"
 
           stage="activate release"
+          ensure_static_root_symlink
           run_as_app ln -sfn "$release" "$APP_ROOT/current.next"
           run_as_app mv -Tf "$APP_ROOT/current.next" "$APP_ROOT/current"
           switched=1

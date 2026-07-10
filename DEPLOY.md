@@ -468,6 +468,9 @@ sudo -u randomon ln -sfn /opt/randomon/shared/client-config/config.js /opt/rando
 sudo -u randomon ln -sfn /opt/randomon/shared/client-config/colors.json /opt/randomon/releases/bootstrap/client/config/colors.json
 sudo -u randomon ln -sfn /opt/randomon/releases/bootstrap /opt/randomon/current
 
+# Keep nginx's documented static root stable while releases switch underneath it.
+sudo -u randomon ln -sfn /opt/randomon/current/client /opt/randomon/client
+
 # Update systemd so the service runs from the current release symlink.
 sudo systemctl edit randomon
 ```
@@ -490,6 +493,7 @@ Then verify:
 sudo systemctl daemon-reload
 sudo systemctl start randomon
 sudo systemctl is-active randomon
+test -L /opt/randomon/client
 curl -fsS http://127.0.0.1:8000/showdown/info
 curl -fsSI https://randomon.patatoa.com
 ```
@@ -559,13 +563,15 @@ For every automatic or manual deployment, the workflow:
     - `/opt/randomon/shared/logs`
     - `/opt/randomon/shared/databases`
     - optional shared sprites and audio directories.
-11. Atomically switches `/opt/randomon/current` to the new release.
-12. Restarts `randomon`.
-13. Verifies `systemctl is-active randomon`.
-14. Checks `http://127.0.0.1:8000/showdown/info`.
-15. Checks `https://randomon.patatoa.com`.
-16. Checks `https://randomon.patatoa.com/showdown/info`.
-17. Opens local and public Showdown WebSockets and requires both
+11. Ensures `/opt/randomon/client` points at `/opt/randomon/current/client` for
+    nginx static-file serving.
+12. Atomically switches `/opt/randomon/current` to the new release.
+13. Restarts `randomon`.
+14. Verifies `systemctl is-active randomon`.
+15. Checks `http://127.0.0.1:8000/showdown/info`.
+16. Checks `https://randomon.patatoa.com`.
+17. Checks `https://randomon.patatoa.com/showdown/info`.
+18. Opens local and public Showdown WebSockets and requires both
     `|updateuser|` and `|challstr|` startup frames.
 
 The workflow does not run Git commands on the VM and does not build on the VM.
@@ -584,6 +590,9 @@ Common fixes:
 
 - Missing `/opt/randomon/current`: complete the one-time artifact-release setup
   above.
+- Public site returns 404 while `/showdown/info` works: confirm
+  `/opt/randomon/client` is a symlink to `/opt/randomon/current/client`. nginx
+  serves `/opt/randomon/client/play.pokemonshowdown.com`.
 - Missing shared config: restore
   `/opt/randomon/shared/config/config.js` or
   `/opt/randomon/shared/client-config/config.js` from the preserved production
