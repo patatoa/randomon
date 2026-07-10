@@ -113,6 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           cd client
+          cp config/config.production.js config/config.js
           PS_ROUTES=config/routes.production.json node build-tools/update full
           test -f play.pokemonshowdown.com/caches/index-new.html
           cp play.pokemonshowdown.com/caches/index-new.html play.pokemonshowdown.com/index.html
