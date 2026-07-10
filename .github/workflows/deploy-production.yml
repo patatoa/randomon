@@ -196,6 +196,13 @@ jobs:
             fi
           done
 
+          for dir in "$APP_ROOT/shared/client-static/data" "$APP_ROOT/shared/client-static/js-lib"; do
+            if [[ ! -d "$dir" ]]; then
+              echo "::error::Missing shared static asset directory $dir. Complete DEPLOY.md one-time setup."
+              exit 1
+            fi
+          done
+
           run_as_app test -w "$APP_ROOT/releases"
           REMOTE
 
@@ -291,6 +298,20 @@ jobs:
             return 1
           }
 
+          verify_public_static_assets() {
+            local asset
+            for asset in \
+              "/js/lib/preact.min.js" \
+              "/js/lib/sockjs-1.4.0-nwjsfix.min.js" \
+              "/js/lib/jquery-2.2.4.min.js" \
+              "/data/pokedex.js" \
+              "/data/moves.js" \
+              "/data/search-index.js"
+            do
+              retry_curl "${PUBLIC_HEALTH_URL}${asset}" "Public static asset ${asset}"
+            done
+          }
+
           verify_showdown_startup() {
             local base_url="$1"
             local label="$2"
@@ -364,6 +385,8 @@ jobs:
             "$staging/config/config.js" \
             "$staging/client/config/config.js" \
             "$staging/client/config/colors.json" \
+            "$staging/client/play.pokemonshowdown.com/data" \
+            "$staging/client/play.pokemonshowdown.com/js/lib" \
             "$staging/client/play.pokemonshowdown.com/sprites" \
             "$staging/client/play.pokemonshowdown.com/audio"
           run_as_app ln -s "$APP_ROOT/shared/logs" "$staging/logs"
@@ -371,6 +394,8 @@ jobs:
           run_as_app ln -s "$APP_ROOT/shared/config/config.js" "$staging/config/config.js"
           run_as_app ln -s "$APP_ROOT/shared/client-config/config.js" "$staging/client/config/config.js"
           run_as_app ln -s "$APP_ROOT/shared/client-config/colors.json" "$staging/client/config/colors.json"
+          run_as_app ln -s "$APP_ROOT/shared/client-static/data" "$staging/client/play.pokemonshowdown.com/data"
+          run_as_app ln -s "$APP_ROOT/shared/client-static/js-lib" "$staging/client/play.pokemonshowdown.com/js/lib"
           if [[ -d "$APP_ROOT/shared/client-assets/sprites" ]]; then
             run_as_app ln -s "$APP_ROOT/shared/client-assets/sprites" "$staging/client/play.pokemonshowdown.com/sprites"
           fi
@@ -402,6 +427,9 @@ jobs:
 
           stage="public Showdown verification"
           retry_curl "$PUBLIC_SHOWDOWN_URL" "Public Showdown"
+
+          stage="public static asset verification"
+          verify_public_static_assets
 
           stage="local startup-frame verification"
           verify_showdown_startup "ws://127.0.0.1:8000/showdown" "Local Showdown"

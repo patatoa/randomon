@@ -426,7 +426,8 @@ sudo mv /opt/randomon /opt/randomon.pre-artifact.$(date +%Y%m%d%H%M%S)
 # Create the release-root layout.
 sudo mkdir -p /opt/randomon/releases /opt/randomon/shared/config \
   /opt/randomon/shared/client-config /opt/randomon/shared/logs \
-  /opt/randomon/shared/databases /opt/randomon/shared/client-assets
+  /opt/randomon/shared/databases /opt/randomon/shared/client-assets \
+  /opt/randomon/shared/client-static
 sudo chown -R randomon:randomon /opt/randomon
 
 # Keep the timestamped backup path handy.
@@ -455,6 +456,13 @@ sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/sprites" \
 sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/audio" \
   /opt/randomon/shared/client-assets/ 2>/dev/null || true
 
+# Preserve ignored static files that a clean GitHub checkout does not contain
+# but the browser needs before the Randomon UI can mount.
+sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/data" \
+  /opt/randomon/shared/client-static/data
+sudo -u randomon cp -a "$OLD/client/play.pokemonshowdown.com/js/lib" \
+  /opt/randomon/shared/client-static/js-lib
+
 # Seed the first release from the preserved working app so rollback is possible
 # before the first artifact workflow succeeds.
 sudo -u randomon mkdir -p /opt/randomon/releases/bootstrap
@@ -466,6 +474,10 @@ sudo -u randomon ln -s /opt/randomon/shared/databases /opt/randomon/releases/boo
 sudo -u randomon ln -sfn /opt/randomon/shared/config/config.js /opt/randomon/releases/bootstrap/config/config.js
 sudo -u randomon ln -sfn /opt/randomon/shared/client-config/config.js /opt/randomon/releases/bootstrap/client/config/config.js
 sudo -u randomon ln -sfn /opt/randomon/shared/client-config/colors.json /opt/randomon/releases/bootstrap/client/config/colors.json
+sudo -u randomon rm -rf /opt/randomon/releases/bootstrap/client/play.pokemonshowdown.com/data
+sudo -u randomon rm -rf /opt/randomon/releases/bootstrap/client/play.pokemonshowdown.com/js/lib
+sudo -u randomon ln -sfn /opt/randomon/shared/client-static/data /opt/randomon/releases/bootstrap/client/play.pokemonshowdown.com/data
+sudo -u randomon ln -sfn /opt/randomon/shared/client-static/js-lib /opt/randomon/releases/bootstrap/client/play.pokemonshowdown.com/js/lib
 sudo -u randomon ln -sfn /opt/randomon/releases/bootstrap /opt/randomon/current
 
 # Keep nginx's documented static root stable while releases switch underneath it.
@@ -496,6 +508,8 @@ sudo systemctl is-active randomon
 test -L /opt/randomon/client
 curl -fsS http://127.0.0.1:8000/showdown/info
 curl -fsSI https://randomon.patatoa.com
+curl -fsSI https://randomon.patatoa.com/js/lib/preact.min.js
+curl -fsSI https://randomon.patatoa.com/data/pokedex.js
 ```
 
 Only remove the preserved `/opt/randomon.pre-artifact.*` directory after a
@@ -562,6 +576,8 @@ For every automatic or manual deployment, the workflow:
     - `/opt/randomon/shared/client-config/colors.json`
     - `/opt/randomon/shared/logs`
     - `/opt/randomon/shared/databases`
+    - `/opt/randomon/shared/client-static/data`
+    - `/opt/randomon/shared/client-static/js-lib`
     - optional shared sprites and audio directories.
 11. Ensures `/opt/randomon/client` points at `/opt/randomon/current/client` for
     nginx static-file serving.
@@ -571,7 +587,8 @@ For every automatic or manual deployment, the workflow:
 15. Checks `http://127.0.0.1:8000/showdown/info`.
 16. Checks `https://randomon.patatoa.com`.
 17. Checks `https://randomon.patatoa.com/showdown/info`.
-18. Opens local and public Showdown WebSockets and requires both
+18. Checks representative public static assets from `js/lib/` and `data/`.
+19. Opens local and public Showdown WebSockets and requires both
     `|updateuser|` and `|challstr|` startup frames.
 
 The workflow does not run Git commands on the VM and does not build on the VM.
@@ -593,6 +610,11 @@ Common fixes:
 - Public site returns 404 while `/showdown/info` works: confirm
   `/opt/randomon/client` is a symlink to `/opt/randomon/current/client`. nginx
   serves `/opt/randomon/client/play.pokemonshowdown.com`.
+- Public site stays on `Loading...`: confirm ignored static assets exist under
+  `/opt/randomon/shared/client-static/data` and
+  `/opt/randomon/shared/client-static/js-lib`, and that the current release
+  links `client/play.pokemonshowdown.com/data` and
+  `client/play.pokemonshowdown.com/js/lib` to those shared directories.
 - Missing shared config: restore
   `/opt/randomon/shared/config/config.js` or
   `/opt/randomon/shared/client-config/config.js` from the preserved production
