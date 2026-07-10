@@ -75,6 +75,12 @@ export class PSConnection {
 	}
 
 	tryConnectInWorker(): boolean {
+		// The Randomon production server currently exposes the standard
+		// SockJS endpoint. The worker path uses raw WebSocket first, which
+		// connects and then closes against SockJS, leaving the client stuck
+		// in "Connecting...". Use the direct SockJS path until the server
+		// exposes a raw WebSocket endpoint.
+		return false;
 		if (this.socket) return false; // must be one or the other
 		if (this.connected) return true;
 
@@ -137,8 +143,10 @@ export class PSConnection {
 
 		try {
 			this.socket = new SockJS(url, [], { timeout: 5 * 60 * 1000 });
-		} catch {
-			this.socket = new WebSocket(url.replace('http', 'ws') + '/websocket');
+		} catch (err) {
+			console.warn('SockJS connection setup failed:', err);
+			this.retryConnection();
+			return;
 		}
 
 		const socket = this.socket!;
